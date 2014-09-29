@@ -1,0 +1,2678 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>MBTA / Keolis Commuter Rail Real-Time Live Mapping - by Stefan!</title>
+<meta http-equiv="content-type" content="text/html; charset=utf-8">
+<meta http-equiv="encoding" content="utf-8">
+<meta charset="utf-8">
+<meta name="viewport" 		content="initial-scale=1.0, width=device-width, user-scalable=no">
+<meta name="format-detection" 	content="telephone=no" />
+<style type="text/css">
+	html { height: 100% ; }
+	body {
+		height: 100% ;
+		margin: 6px ;
+		padding: 6px ;
+	}
+	#map_canvas {
+		border-width: 2px ;
+		border-style: solid ;
+	}
+	#legend, #controls, #stillLoadingDiv {
+		font-family: Arial, sans-serif;
+		font-size: small ;
+		font-weight: bold ;
+		background: #fff;
+		padding: 5px;
+		margin: 8px;
+		border: 2px solid #000;
+	}
+	#legend h4 {
+		margin: 3px;
+		text-align: left ;
+	}
+	#legend img {
+		vertical-align: middle;
+	}
+	#stillLoadingDiv p {
+		font-size: medium ;
+		margin: 10px;
+	}
+	.legendBox {
+		padding: 5px;
+		margin: 2px;
+		border: 1px solid #000;
+	}
+	.legendBoxMobile {
+		padding: 2px;
+		margin: 1px;
+		border: 1px solid #000;
+	}
+	.MarkerWithLabelClass {
+		border: 1px solid black;
+		font-family: "Lucida Grande", "Arial", sans-serif;
+		font-size: 10px;
+		font-weight: bold;
+		margin: 1px;
+		opacity: 1.0;
+		padding: 2px;
+		text-align: center;
+		white-space: nowrap;
+		/* width: 60px; */
+	}
+</style>
+<script type="text/javascript" src="http://maps.googleapis.com/maps/api/js?v=3&key=AIzaSyCAvYfLhnV9ogAV4jshL4nYuCHecIVzpQw&sensor=true"></script>
+<script type="text/javascript" src="http://ajax.googleapis.com/ajax/libs/jquery/1.11.0/jquery.min.js"></script>
+<script type="text/javascript" src="http://google-maps-utility-library-v3.googlecode.com/svn/trunk/geolocationmarker/src/geolocationmarker-compiled.js"></script>
+<script type="text/javascript" src="http://google-maps-utility-library-v3.googlecode.com/svn/trunk/styledmarker/src/StyledMarker.js"></script>
+<script type="text/javascript" src="http://google-maps-utility-library-v3.googlecode.com/svn/trunk/markerclustererplus/src/markerclusterer_packed.js"></script>
+<script type="text/javascript" src="http://google-maps-utility-library-v3.googlecode.com/svn/trunk/markerwithlabel/src/markerwithlabel_packed.js"></script>
+<script type="text/javascript" src="http://www.people.fas.harvard.edu/~wuensch/plugins/tablesorter/jquery.tablesorter.min.js"></script>
+<link   rel="stylesheet"      href="http://www.people.fas.harvard.edu/~wuensch/plugins/tablesorter/themes/blue/style.css" type="text/css" />
+
+<script type="text/javascript">
+
+var usingLocationServices = false ;	// Master indicator of location awareness
+var followingLivePosition = false ;
+var isMobilePlatform = false ;
+var didUserChangeZoom = false ;
+var didUserChangeLine = false ; 	// This kicks doPanZoomToFit() in the mainLoop() if true, but it looks nicer if we start off with a specifc zoom value at first. Purely cosmetic.
+var userDebugChoice = false ;
+var userLogChoice   = false ;
+var globalHeadingChangedState = false ;
+var didTrainListChange = true ;
+var updateInterval = userDebugChoice ? 10000 : 24000 ;
+var massStateHouseLat = 42.357708 ;
+var massStateHouseLng = -71.063564 ;
+var minBoundsSize = 0.008 ;
+var html5Position, globalUserGeolocationPosition, mainMapObject, markerBounds, locationInfoWindow, markerInfoWindow, infoWindowCloseTimeoutRef, referenceToCycleInterval = null, watchLivePositionObject, myGeoMarker ;
+var markerCluster, totalTrainsVisible, totalTrainsHidden, tripMarkerPrefix, coachMarkerPrefix, destinationMarkerPrefix, latenessMarkerPostfix, speedMarkerPostfix ;
+var markerWithInfoWindow, userCoachToFollow, userTrainToFollow, mainLoopRunning = false, lastMainLoopTime = 0 ;
+var userMarkerLabelChoice = "cycle" ;			// Set default
+var activeMarkerLabel =     "cycle" ;			// Set default
+var userGoogleMarkerType =   "MarkerWithLabel" ; 	// Set default
+var activeGoogleMarkerType = "MarkerWithLabel" ; 	// Set default
+var markerLabelsForCycling = {
+				allLabels: [ "trip", "destination", "nextStopName", "lateness", "coach", "speed" ],
+				justColor: [ "trip",                                "lateness", "coach", "speed" ]
+			     } ;
+var markerLabelsToCycle = markerLabelsForCycling.allLabels ;
+var labelCycleInterval = 6000 ;
+var labelCycleCurrentIndex = 0 ;
+var legendJSON = {} ;
+var motionPaths = {} ;
+var markers = {} ;
+var departures = {} ;
+var persistentSortLists = {} ;
+var alreadyMappedCoaches = {} ;
+var trainsHashByTripJSON = {} ;
+var alreadyMappedCoachesLength = 0 ;
+var totalNoPositionTrips = 0 ;
+var queryStringHash = getUrlVars() ;
+var compassHeadingArrowBaseURL = "http://" + window.location.host + "/~wuensch/T/img/red_arrow_" ;
+
+updateInterval = 15000 ;			// Override update for dev version only.
+labelCycleInterval = 3000 ;			// Dev only
+
+var selectedLine = 		( queryStringHash[ 'line' ]  ? queryStringHash[ 'line' ]  : "all" ) ;
+var queryStringCoachToFollow = 	( queryStringHash[ 'coach' ] ? queryStringHash[ 'coach' ] : null ) ;
+var queryStringTrainToFollow = 	( queryStringHash[ 'train' ] ? queryStringHash[ 'train' ] : null ) ;
+
+if ( navigator.userAgent.toLowerCase().indexOf( "iphone" ) !== -1 ||
+	navigator.userAgent.toLowerCase().indexOf( "mobile" ) !== -1 ||
+	navigator.userAgent.toLowerCase().indexOf( "android" ) !== -1 ) {
+		isMobilePlatform = true ;
+		userDebugChoice = false ;
+		updateInterval = 41000 ;	// Go easy on mobile devices with less horsepower.
+		labelCycleInterval = 8000 ;	// However, lots of markers changing often does seem to be a drag.
+}
+
+google.maps.visualRefresh = true ;
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+/* This is the main function which does all the work. Can be called any time, all the time. */
+function mainLoop() {
+
+	mainLoopRunning = true ;
+	lastMainLoopTime = Math.floor( new Date / 1000 ) ;
+	//console.log( "mainLoop start, " + new Date ) ;
+
+//debug	var departuresURL = "http://" + window.location.host + "/~wuensch/T/keolis-departures-json.cgi" ;
+	var departuresURL = "http://" + window.location.host + "/~wuensch/T/keolis-departures-json-dev.cgi" ;
+
+	debug( "Getting fresh departuresJSON data." ) ;
+	$.getJSON( departuresURL, function( departuresJSON ) {
+		departures = {} ;
+		for ( var trip in departuresJSON.DeparturesByTrip ) {			// Access it this way: departuresJSON.DeparturesByTrip[ trip ].humanScheduledTime
+			departures[ trip ] = departuresJSON.DeparturesByTrip[ trip ] ;	// Access it this way: departures[ trip ].Track
+		}
+		if ( departuresJSON.tripsWithTrackStatus.length == 0 && departuresJSON.tripsWithLateness.length == 0 ) {	// If there's nothing with track or lateness, blank the div right away.
+			document.getElementById( 'mappedDeparturesDiv' ).innerHTML = "" ;					// This gets reset later on anyway, but doing it now makes it look better - so we're not waiting for the other JSON GET.
+		}
+	} ) ;
+
+//debug	var trainAndCoachURL = "http://" + window.location.host + "/~wuensch/T/keolis-json.cgi?line=" + selectedLine ;
+	var trainAndCoachURL = "http://" + window.location.host + "/~wuensch/T/keolis-json-dev.cgi?line=" + selectedLine ;
+//	var trainAndCoachURL = "http://" + window.location.host + "/~wuensch/T/json-alternating.cgi" ;
+	var trainAndCoachJSON = {} ;
+
+	debug( "Getting fresh trainAndCoachJSON data." ) ;
+	$.getJSON( trainAndCoachURL, function( trainAndCoachJSON ) {
+
+		var mostRecentTimestamp = 1 ;			// Starting value in order to find the highest (newest) age out of all data points.
+		var mostRecentTimestampHuman = "(Unknown)" ;
+		document.getElementById( "log" ).innerHTML = "" ;
+		document.getElementById( 'mappedDeparturesDiv' ).innerHTML = "" ;
+		document.getElementById( 'unmappedTrainsSummaryDiv' ).innerHTML = "" ;
+
+		// Clear old markers of trains no longer in the feed
+		for ( var alreadyMappedCoach in alreadyMappedCoaches ) {
+			if ( ! trainAndCoachJSON.trainsHashByCoach[ alreadyMappedCoach ] ) {
+				deleteMarker( alreadyMappedCoach, false ) ;	// Don't keep any motion path.
+			}
+		}
+
+		legendJSON = trainAndCoachJSON.legendColors ; 	// For later use.
+		trainsHashByTripJSON = trainAndCoachJSON.trainsHashByTrip ; // For later use.
+		updateLegend( activeMarkerLabel ) ;
+
+		for ( var coachNumber in trainAndCoachJSON.trainsHashByCoach ) {		// This is the critical marker loop!
+
+			// If we have not loaded this coach object before, or (only!) if the time stamp shows it's newer data, then load it up.
+			if ( ! alreadyMappedCoaches[ coachNumber ] || alreadyMappedCoaches[ coachNumber ].TimeStamp != trainAndCoachJSON.trainsHashByCoach[ coachNumber ].TimeStamp ) {
+				alreadyMappedCoaches[ coachNumber ] = trainAndCoachJSON.trainsHashByCoach[ coachNumber ] ;	// Copy this entire coach data structure in for global reference.
+			}
+
+			if ( ! markers[ coachNumber ] ) {
+				markers[ coachNumber ] = makeNewMarker( trainAndCoachJSON.trainsHashByCoach[ coachNumber ], coachNumber ) ;
+			} else {
+				updateMarker( trainAndCoachJSON.trainsHashByCoach[ coachNumber ], coachNumber, true ) ;
+			}
+
+			document.getElementById( 'mappedDeparturesDiv' ).innerHTML += returnLongDepartureText( alreadyMappedCoaches[ coachNumber ].Trip ) ;
+
+			if ( trainAndCoachJSON.trainsHashByCoach[ coachNumber ].TimeStamp > mostRecentTimestamp ) {
+				mostRecentTimestamp = trainAndCoachJSON.trainsHashByCoach[ coachNumber ].TimeStamp ;
+				mostRecentTimestampHuman = trainAndCoachJSON.trainsHashByCoach[ coachNumber ].humanTimeStamp ;
+			}
+
+		}	// End of coachNumber in trainAndCoachJSON.trainsHashByCoach loop
+
+		totalNoPositionTrips = 0 ;
+		if ( document.getElementById( 'stillLoadingDiv' ).style.display !== "none" ) {
+			document.getElementById( 'stillLoadingDiv' ).innerHTML = "<P>Finished loading data.</P>" ;
+			var loadingTimerTemp = setTimeout( function() {
+					document.getElementById( 'stillLoadingDiv' ).style.display = "none" ;
+				}, 1500 )
+		}
+		
+		document.getElementById( 'mappedTrainsTableDiv' ).innerHTML = "<font size=-1>Click on a column heading to sort the table on that attribute. To sort on multiple columns, Shift-Click additional column headings.</font>" ;
+		makeHTMLtable( 'mappedTrainsTableDiv',
+				alreadyMappedCoaches,
+				'Coach',				// Primary key name in the associative array
+				3,					// Column on which to sort
+				{ 1: { sorter: "text" },		// Default sorting for each column
+				  3: { sorter: "time" },
+				  4: { sorter: "integer" } 
+				},
+				[ 'Coach:Control <BR>Coach <BR>No.', 'Trip:Train <BR>No.', 'nextStopName:Next or <BR>Nearest Stop', 'humanNextStopTime:Scheduled <BR>Time', 
+					'onTimeStatusText:Late / Early', 'statusText:Status', 'lineName:Line / Route', 'Destination:Trip Destination', 
+					'Speed:Speed <BR>(MPH)', 'humanTimeStamp:Data updated'
+				]
+		) ;
+
+		document.getElementById( 'unmappedTrainsTableDiv' ).innerHTML = "<font size=-1>Click on a column heading to sort the table on that attribute. To sort on multiple columns, Shift-Click additional column headings.</font>" ;
+		makeHTMLtable( 'unmappedTrainsTableDiv', 
+				trainAndCoachJSON.noPositionTrips,
+				'Trip',					// Primary key name in the associative array
+				1,					// Column on which to sort
+				{ 0: { sorter: "text" },		// Default sorting for each column
+				  1: { sorter: "time" }
+				},
+				[ 'Trip:Train <BR>No.', 'humanNextStopTime:Scheduled <BR>Stop Time', 'nextStopName:Scheduled At', 'unmappedStatusText:Status', 
+					'lineName:Line / Route', 'Destination:Trip Destination', 'humanTimeStamp:Data last updated'
+				]
+		) ;
+
+//		document.getElementById( 'unmappedTrainsListDiv' ).innerHTML = "" ;
+		var unmappedDepartures = 0 ;
+		var noPositionTripsArrayTemp = [] ;
+		for ( var noPositionTrip in trainAndCoachJSON.noPositionTrips ) {
+			totalNoPositionTrips++ ;
+			noPositionTripsArrayTemp.push( trainAndCoachJSON.noPositionTrips[ noPositionTrip ].nextStopTime + ":" + noPositionTrip ) ;
+		}
+		noPositionTripsArrayTemp.sort() ;	// Sorts on nextStopTime first then trip number
+		for ( var counter = 0 ; counter < noPositionTripsArrayTemp.length ; counter++ ) {
+			var sortedTripNumber = noPositionTripsArrayTemp[ counter ].split( ":" )[ 1 ] ;		// This is freaking cool! After sorting on datestamp the custom colon-delim text we built, pull out the trip number only! THIS IS ALMOST LIKE SORTING HASH KEYS IN PERL!!! W00T!!
+			if ( departures[ sortedTripNumber ] && ( departures[ sortedTripNumber ].Track != "" || departures[ sortedTripNumber ].Lateness != "0" ) ) { unmappedDepartures++ } ;
+		}
+
+		var ageOfNewestData = Math.floor( new Date() / 1000 ) - mostRecentTimestamp ;
+		if ( alreadyMappedCoachesLength == 0 && totalNoPositionTrips == 0 ) { 			// No trains at all!!
+			document.getElementById( 'mappedTrainsDiv' ).style.display = "none" ;
+			document.getElementById( 'dataErrorDiv' ).innerHTML = "<br><B><font color=\"red\">There may be a problem with the entire MBTA data feed right now. There is no train information at all!!</font></B>" ;
+			noTrainsMapResize( false ) ;
+		} else if ( alreadyMappedCoachesLength == 0 && totalNoPositionTrips !== 0) { 		// No trains on the map, but there is schedule data without mappable data
+			document.getElementById( 'mappedTrainsDiv' ).style.display = "none" ;
+			document.getElementById( 'dataErrorDiv' ).innerHTML = "<br><B><font color=\"red\">There may be a problem with the MBTA live train data feed right now.</font> There are no trains with any position information!</B>" ;
+			noTrainsMapResize( false ) ;
+			if ( document.getElementById( 'unmappedTrainsListDiv' ).style.display == "none" ) {
+				unmappedTrainsListOnOffFlip() ;
+			}
+		} else if ( ageOfNewestData > 900 ) {							// There are mapped trains, but it's stale data
+			document.getElementById( 'dataErrorDiv' ).innerHTML = "<br><B><font color=\"red\">There may be a problem with the MBTA data feed right now. All train data are stale by 15 min. or more!</font></B>" ;
+			document.getElementById( 'dataErrorDiv' ).innerHTML += "<br><B>The most recent data update for any train was " + Math.floor( ageOfNewestData / 60 ) + " minutes ago, " + mostRecentTimestampHuman + ".</B>" ;
+			document.getElementById( 'mappedTrainsDiv' ).style.display = "" ;		// Un-hide the div because there are trains to show, even though it's old data.
+			noTrainsMapResize( true ) ;
+		} else {
+			document.getElementById( 'mappedTrainsDiv' ).style.display = "" ;		// Un-hide the div if things look OK.
+			noTrainsMapResize( true ) ;
+		}
+
+		if ( alreadyMappedCoachesLength != 0 
+			&& ageOfNewestData < 900 
+			&& trainAndCoachJSON.duplicateTrips.length == 0 ) { 				// There are mapped trains, and it's recent data, and no duplicates, so clear any previous error messages.
+				document.getElementById( 'dataErrorDiv' ).innerHTML = "" ;
+		}
+
+		if ( totalNoPositionTrips > 0 ) { 							// Any trains without live position that we can't put on the map?
+			document.getElementById( 'unmappedTrainsDiv' ).style.display = "" ;
+			document.getElementById( 'unmappedTrainsSummaryDiv' ).innerHTML += "<b>" + totalNoPositionTrips + " trips cannot be mapped</b>" ;
+			if ( unmappedDepartures > 0 ) {
+				document.getElementById( 'unmappedTrainsSummaryDiv' ).innerHTML += ", including <b>"
+												+ unmappedDepartures
+												+ ( unmappedDepartures > 1 ? " trips which have " : " trip which has " )
+												+ "live departure board info</b>." ;
+			} else {
+				document.getElementById( 'unmappedTrainsSummaryDiv' ).innerHTML += "." ;
+			}
+		} else {
+			document.getElementById( 'unmappedTrainsDiv' ).style.display = "none" ;
+		}
+
+		if ( trainAndCoachJSON.duplicateTrips.length !== 0 ) {
+			processDuplicateTrips( trainAndCoachJSON.duplicateTrips, trainAndCoachJSON.trainsHashByTrip, 'duplicatesDiv' ) ;
+		} else {
+			document.getElementById( 'duplicatesDiv' ).innerHTML = "" ;
+		}
+		processUserHidingChoice() ;
+		processUserQueryOptions( trainAndCoachJSON.trainsHashByTrip ) ;
+
+		if ( didUserChangeLine === true && didUserChangeZoom === false ) {
+			doPanZoomToFit() ;
+			didUserChangeLine = false ;
+		} ;
+
+		if ( didTrainListChange == true ) {
+			updateCoachesOptionList() ;
+			updateTrainsOptionList( trainAndCoachJSON ) ;
+			didTrainListChange = false ;
+		}
+
+	mainLoopRunning = false ;
+	//console.log( "mainLoop end, " + new Date ) ;
+
+	} ) ;		// End of $.getJSON
+}			// End of mainLoop()
+
+
+
+
+
+/******************************************************************************************************/
+function processDuplicateTrips( duplicateTripsJSON, trainsHashByTripJSON, divForOutputName ) {
+
+	var divForOutput = document.getElementById( divForOutputName ) ;
+	divForOutput.innerHTML = "<B><font color=\"#CC0000\">There are duplicate trains!</font></B>" ;
+	divForOutput.innerHTML += ( duplicateTripsJSON.length > 1 ? "<BR>" : " " ) ;
+
+	for ( var indexTemp = 0 ; indexTemp < duplicateTripsJSON.sort().length ; indexTemp++ ) {
+		divForOutput.innerHTML += "Train number " + duplicateTripsJSON[ indexTemp ] + " is being reported by " ;
+		for ( var coachIndex = 0 ; coachIndex < trainsHashByTripJSON[ duplicateTripsJSON[ indexTemp ] ].Vehicles.length ; coachIndex++ ) {
+			divForOutput.innerHTML += "Coach " + returnCoachLinkHTML( 'startFollowingCoach', trainsHashByTripJSON[ duplicateTripsJSON[ indexTemp ] ].Vehicles[ coachIndex ] ) ;
+			divForOutput.innerHTML += ( coachIndex < ( trainsHashByTripJSON[ duplicateTripsJSON[ indexTemp ] ].Vehicles.length - 1 ) ? " <B>and</B> " : "." ) ;
+		}
+		divForOutput.innerHTML += ( duplicateTripsJSON.length > 1 ? "<BR>" : " " ) ;
+	}
+
+}
+
+
+
+/******************************************************************************************************/
+function updateLegend( markerLabelKind ) {
+
+	var legendDiv = document.getElementById( 'legend' ) ;
+
+	if ( legendJSON[ 'direction' ] ) {		// Check for the order, labels & colors - otherwise don't show the legend.
+		legendDiv.style.display = "" ;
+	} else {
+		legendDiv.style.display = "none" ;
+		return ;
+	}
+
+	if ( activeGoogleMarkerType == 'MarkerImage' ) {
+		legendDiv.style.textAlign = 'center' ;
+		legendDiv.innerHTML = "<h4>Legend</h4>" ;
+		var exampleHeadings = { '0': 'Heading<BR>(Direction)', 'X': 'Unknown<BR>Heading' } ;
+		for ( var exampleHeading in exampleHeadings ) {
+			var newDiv = document.createElement( 'div' ) ;
+			var tempHTML = '<img src="' + makeCompassHeadingArrowURL( exampleHeading ) + '"><BR>' ;
+			newDiv.className = ( isMobilePlatform !== true ? 'legendBox' : 'legendBoxMobile' ) ;
+			newDiv.innerHTML = tempHTML + exampleHeadings[ exampleHeading ] ;
+			legendDiv.appendChild( newDiv ) ;
+		}
+	} else {
+		legendDiv.innerHTML = "<h4>Colors Legend</h4>" ;
+
+		if ( ! legendJSON[ markerLabelKind ] ) {
+			markerLabelKind = 'direction' ;
+		}
+
+		for ( var colorIndex in legendJSON[ markerLabelKind ].order ) {
+			var markerColor = legendJSON[ markerLabelKind ].order[ colorIndex ] ;
+			var newDiv = document.createElement( 'div' ) ;
+			newDiv.className = ( isMobilePlatform !== true ? 'legendBox' : 'legendBoxMobile' ) ;
+			newDiv.style.backgroundColor = '#' + markerColor ;
+			newDiv.style.color = '#' + legendJSON[ markerLabelKind ].textColors[ markerColor ] ;
+			newDiv.innerHTML = legendJSON[ markerLabelKind ].labels[ markerColor ] ;
+			legendDiv.appendChild( newDiv ) ;
+		}
+	}
+}
+
+
+
+/******************************************************************************************************/
+function returnShortDepartureText( tripNumber ) {
+
+	if ( departures[ tripNumber ] ) {					// Does it exist in the departure feed now?
+		if ( departures[ tripNumber ].Track != "" 			// Is there a track available?
+			|| departures[ tripNumber ].Lateness != "0" ) {		// Or is it showing late data?
+			return (
+				  ( departures[ tripNumber ].Lateness != "0" && ( departures[ tripNumber ].Status == "On Time" || departures[ tripNumber ].Status == "Cancelled" ) 
+					? '"' + departures[ tripNumber ].Status + '" but also shows lateness' 
+					: departures[ tripNumber ].Status )
+				+ ( departures[ tripNumber ].Lateness != "0" ? " (<font color=\"#990000\">late " + Math.floor( departures[ tripNumber ].Lateness / 60 ) + " min.</font>) " : " " )
+				+   departures[ tripNumber ].Origin
+				+ ( departures[ tripNumber ].Track != "" ? " Track " + departures[ tripNumber ].Track : "" )
+			) ;
+		}
+	}
+	return "" ;	// Nothing interesting, or it wasn't found.
+}
+
+
+
+/******************************************************************************************************/
+function returnLongDepartureText( tripNumber ) {
+	if ( departures[ tripNumber ] ) {					// Does it exist in the departure feed now?
+		if ( departures[ tripNumber ].Track != "" 			// Is there a track available?
+			|| departures[ tripNumber ].Lateness != "0" ) {		// Or is it showing late data?
+console.log( "--->" + returnTrainLinkHTML( 'startFollowingTrain', "X" + tripNumber, "Train ", "X" ) + "<---" );
+				return ( returnTrainLinkHTML( 'startFollowingTrain', "X" + tripNumber, "Train ", "X" )	// Have to prefix the train number in case of leading zero!
+					+ " to " 
+					+   departures[ tripNumber ].Destination
+					+ ( departures[ tripNumber ].Lateness == "0" ? " departing at " : " scheduled for " )
+					+   departures[ tripNumber ].humanScheduledTime
+					+ " is <b>" 
+					+ ( departures[ tripNumber ].Lateness != "0" && ( departures[ tripNumber ].Status == "On Time" || departures[ tripNumber ].Status == "Cancelled" ) 
+						? '"' + departures[ tripNumber ].Status + '" but also has lateness data' 
+						: departures[ tripNumber ].Status )
+					+ ( departures[ tripNumber ].Lateness != "0" ? " (<font color=\"#990000\">late " + Math.floor( departures[ tripNumber ].Lateness / 60 ) + " min.</font>)" : "" )
+					+ ( departures[ tripNumber ].Track != "" ? " on " : " at " ) 
+					+   departures[ tripNumber ].Origin
+					+ ( departures[ tripNumber ].Track != "" ? " Track " + departures[ tripNumber ].Track : "" )
+					+ "</b>, " 
+					+   departures[ tripNumber ].humanTimeStamp
+					+ ( isMobilePlatform == true ? "<p>" : "<br>" ) 
+				)
+		}
+	}
+	return "" ;	// Nothing interesting, or it wasn't found.
+}
+
+
+
+
+/******************************************************************************************************/
+function makeHTMLtable( pageDivElementName, JSONdata, primaryKey, sortOnColumn, sortDirectives, keysToColumnsOrder ) {
+
+	var totalInstances = 0 ;
+	var pageDivElementTableName = pageDivElementName + 'Table' ;
+	var table = $( '<table border="1" cellpadding="5" class="tablesorter" id="' + pageDivElementTableName + '"><thead/><tbody/><tfoot/></table>' ) ;
+
+	table.bind( "sortEnd", function() {
+		persistentSortLists[ pageDivElementTableName ] = this.config.sortList ;
+	} ) ;
+
+	var trHead = $( '<tr/>' ) ;
+	for ( var headerKeyCounter = 0 ; headerKeyCounter < keysToColumnsOrder.length ; headerKeyCounter++ ) {
+		trHead.append( '<th name="' + keysToColumnsOrder[ headerKeyCounter ].split( ":" )[ 0 ] + '">' + keysToColumnsOrder[ headerKeyCounter ].split( ":" )[ 1 ] + '</th>' ) ;
+	}
+	table.find( 'thead' ).append( trHead ) ;
+
+	for ( var instance in JSONdata ) {
+		JSONdata[ instance ][ primaryKey ] = instance ;		// This is so that we can reference a key also as a value when we find that one in the column order array!!
+		var trBody = $( '<tr/>' ) ;
+		var thisInstanceCoachNumber = null ;
+		var thisInstanceTripNumber = null ;
+		for ( var keysCounter = 0 ; keysCounter < keysToColumnsOrder.length ; keysCounter++ ) {
+			
+			if ( keysToColumnsOrder[ keysCounter ].split( ":" )[ 0 ] == "Coach" ) {
+				thisInstanceCoachNumber = JSONdata[ instance ][ keysToColumnsOrder[ keysCounter ].split( ":" )[ 0 ] ] ;		// If we're on the coach number data, save it for later use
+				trBody.append( '<td>' 
+					+ returnCoachLinkHTML( 'startFollowingCoach', thisInstanceCoachNumber ) 
+					+ '</td>' ) ;
+
+			} else if ( keysToColumnsOrder[ keysCounter ].split( ":" )[ 0 ] == "Trip" ) {
+				thisInstanceTripNumber = JSONdata[ instance ][ keysToColumnsOrder[ keysCounter ].split( ":" )[ 0 ] ] ;		// If we're on the trip number data, save it for later use
+				trBody.append( '<td>' 
+					+ JSONdata[ instance ][ keysToColumnsOrder[ keysCounter ].split( ":" )[ 0 ] ] 
+					+ '</td>' ) ;
+
+			} else if ( keysToColumnsOrder[ keysCounter ].split( ":" )[ 0 ] == "statusText" && thisInstanceCoachNumber !== null ) {
+				var shortText = returnShortDepartureText( thisInstanceTripNumber ) ;
+				trBody.append( '<td>' 
+					+ ( shortText ? '<B>' + shortText + '</B> / ' : "" ) 
+					+ JSONdata[ instance ][ keysToColumnsOrder[ keysCounter ].split( ":" )[ 0 ] ] 
+					+ '</td>' ) ;
+
+			} else if ( keysToColumnsOrder[ keysCounter ].split( ":" )[ 0 ] == "unmappedStatusText" ) {
+				var shortDepartureText = returnShortDepartureText( thisInstanceTripNumber ) ;
+				var jsonStatus = JSONdata[ instance ][ keysToColumnsOrder[ keysCounter ].split( ":" )[ 0 ] ] ;
+				if ( jsonStatus == "Scheduled" ) {
+					jsonStatus = "Scheduled, no live location info" ;
+				}
+				trBody.append( '<td>' 
+					+ ( shortDepartureText ? '<B>' + shortDepartureText + '</B> / ' : "" ) 
+					+ jsonStatus
+					+ '</td>' ) ;
+
+			} else if ( keysToColumnsOrder[ keysCounter ].split( ":" )[ 0 ] == "lineName" ) {
+				trBody.append( '<td><A HREF="' 
+					+ JSONdata[ instance ].scheduleURL 
+					+ '" TARGET="_new">' 
+					+ JSONdata[ instance ][ keysToColumnsOrder[ keysCounter ].split( ":" )[ 0 ] ] 
+					+ '</A>, '
+					+ ( JSONdata[ instance ].direction == "O" ? "Outbound" : "Inbound" )
+					+ '</td>' ) ;
+
+			} else {
+				trBody.append( '<td>' 
+					+ JSONdata[ instance ][ keysToColumnsOrder[ keysCounter ].split( ":" )[ 0 ] ] 
+					+ '</td>' ) ;	// Wow I can't believe I got this worked out!! Another W00T!!!
+			}
+		}
+		table.find( 'tbody' ).append( trBody ) ;
+		totalInstances++ ;
+	}
+
+	if ( totalInstances > 25 ) {
+		var trFoot = $( '<tr/>' ) ;
+		for ( var footerKeyCounter = 0 ; footerKeyCounter < keysToColumnsOrder.length ; footerKeyCounter++ ) {
+			trFoot.append( '<th>' + keysToColumnsOrder[ footerKeyCounter ].split( ":" )[ 1 ] + '</th>' ) ;
+		}
+		table.find( 'tfoot' ).append( trFoot ) ;
+	}
+
+	$( document.getElementById( pageDivElementName ) ).append( table ) ;
+	if ( totalInstances > 0 ) {
+		$( "#" + pageDivElementTableName ).tablesorter( {
+								// debug: true,
+								widgets: [ "zebra" ],
+								headers: sortDirectives,
+								sortList: ( typeof( persistentSortLists[ pageDivElementTableName ] ) == "undefined"
+									? [ [ sortOnColumn, 0 ] ]
+									: persistentSortLists[ pageDivElementTableName ]
+								)
+							} ) ;
+	} else {
+		$( "#" + pageDivElementTableName ).tablesorter() ;
+	}
+
+// These probably need to be elsewhere, if at all...
+//	var pageDivElementObject = document.getElementById( pageDivElementName ) ;
+//	$( pageDivElementObject ).trigger( "update" ) ;
+
+}
+
+
+
+
+/******************************************************************************************************/
+function onIdle() {
+	if ( globalHeadingChangedState === true	) {
+		globalHeadingChangedState = false ;
+		changeMarkers() ;
+
+		mainMapObject.panBy( 1, 0 ) ;	// Scootch a bit and then back in case the map rotation didn't fully redraw
+		mainMapObject.panBy( -1, 0 ) ;
+	}
+}
+
+
+
+/******************************************************************************************************/
+function onResize() {
+	var browserWindowSize = getWindowSize() ;
+	var topTextArea     = document.getElementById( "topText" ) ;
+	var mapCanvasObject = document.getElementById( "map_canvas" ) ;
+	mapCanvasObject.style.height = ( browserWindowSize.height - topTextArea.height - 50 ) + "px" ;
+	google.maps.event.trigger( mainMapObject, "resize" ) ;
+}
+
+
+
+/******************************************************************************************************/
+function getWindowSize() {
+	var thing = new Object() ;
+	if ( window.self && self.innerWidth ) {
+		thing.width  = self.innerWidth ;
+		thing.height = self.innerHeight ;
+	} else {
+		if ( document.documentElement && document.documentElement.clientHeight ) {
+			thing.width  = document.documentElement.clientWidth ;
+			thing.height = document.documentElement.clientHeight ;
+		} else {
+			thing.width = document.body.clientWidth ;
+			thing.height = document.body.clientHeight ;
+		}
+	}
+	return thing
+}
+
+
+/******************************************************************************************************/
+function returnCoachLinkHTML( functionName, someCoachNumber ) {
+
+	return ( '<a href="#map" onClick="' + functionName + '( ' + someCoachNumber + ' );">' + someCoachNumber + '</a>' )
+
+}
+
+
+/******************************************************************************************************/
+function returnTrainLinkHTML( functionName, someTrainNumber, prefix, splitter ) {
+
+//	return ( '<a href="#map" onClick="' + functionName + '( ' + someTrainNumber + ' );">' 
+//			+ prefix + someTrainNumber.split( splitter )[ 1 ] + '</a>' 
+//	)
+	return ( '<a href="#map" onClick="window.alert( foo );">' + someTrainNumber + '</a>' ) ;
+
+}
+
+
+
+
+/******************************************************************************************************/
+function noTrainsMapResize( wantLargeBool ) {
+	var mapCanvasObject = document.getElementById( "map_canvas" ) ;
+	if ( isMobilePlatform === true ) {
+		mapCanvasObject.style.width  = ( wantLargeBool === true ? '94%' : '85%' ) ;
+		mapCanvasObject.style.height = ( wantLargeBool === true ? '100%' : '50%' ) ;
+	} else {
+		mapCanvasObject.style.width  = ( wantLargeBool === true ? '90%' : '60%' ) ;
+		mapCanvasObject.style.height = ( wantLargeBool === true ? '75%' : '50%' ) ;
+	}
+	google.maps.event.trigger( mainMapObject, "resize" ) ;
+	if ( wantLargeBool === false ) {
+		doPanZoomToFit() ;
+	}
+
+//	if ( window.location.pathname.toLowerCase().indexOf( "dev" ) !== -1 ) {
+//		document.getElementById( 'map_canvas' ).style.height = '50%' ;		// Make it smaller if we're dev, for less scrolling!
+//	}
+
+//	var windowSize = getWindowSize() ;
+//	mapCanvasObject.style.height = ( windowSize.height * 0.5 ) + "px" ;
+//	mapCanvasObject.style.width  = ( windowSize.width  * 0.5 ) + "px" ;
+}
+
+
+/******************************************************************************************************/
+function deleteAllMarkers() {
+	for ( var alreadyMappedCoach in alreadyMappedCoaches ) {
+		deleteMarker( alreadyMappedCoach, false ) ;		// Delete the marker but KEEP any motion path for the next marker.
+	}
+}
+
+
+/******************************************************************************************************/
+function deleteMarker( staleCoach, keepMotionPathsBool ) {		// Only delete an existing motion path if we are NOT switching marker types.
+
+	if ( motionPaths[ staleCoach ] && keepMotionPathsBool === false ) {
+		motionPaths[ staleCoach ].setMap( null ) ;
+		motionPaths[ staleCoach ] = null ;
+	}
+
+	markerCluster.removeMarker( markers[ staleCoach ] ) ;
+	markers[ staleCoach ].setMap( null );
+	delete markers[ staleCoach ] ;
+
+	delete alreadyMappedCoaches[ staleCoach ] ;
+	alreadyMappedCoachesLength-- ;
+	didTrainListChange = true ;
+
+	log( "Removed coach " + staleCoach ) ;
+}
+
+
+/******************************************************************************************************/
+function setMarkerTextVerbosity() {
+
+	if ( document.getElementById( "verbosityCheckbox" ).checked == true ) {
+		tripMarkerPrefix = "Train " ;
+		coachMarkerPrefix = "Control Coach " ;
+		destinationMarkerPrefix = "to " ;
+		latenessMarkerPostfix = " min." ;
+		speedMarkerPostfix = " MPH" ;
+	} else {
+		tripMarkerPrefix = "" ;
+		coachMarkerPrefix = "" ;
+		destinationMarkerPrefix = "" ;
+		latenessMarkerPostfix = "" ;
+		speedMarkerPostfix = "" ;
+	}
+
+	// The only thing this function does is update label text content,
+	// so this loop is all we need.
+	for ( var alreadyMappedCoach in alreadyMappedCoaches ) {
+		updateMarker( alreadyMappedCoaches[ alreadyMappedCoach ], alreadyMappedCoach, false ) ;
+	}
+}
+
+
+/******************************************************************************************************/
+function processUserLabelChoice() {
+
+	userMarkerLabelChoice = document.getElementById( 'markerLabelChoice' ).value ;
+
+	if ( userMarkerLabelChoice == "cycle" ) {
+		cycleNextMarkerLabel() ;
+		if ( referenceToCycleInterval === null ) {
+			referenceToCycleInterval = setInterval( cycleNextMarkerLabel, labelCycleInterval ) ;
+		}
+		return ;
+	} else if ( referenceToCycleInterval !== null ) {
+		clearInterval( referenceToCycleInterval ) ;
+		referenceToCycleInterval = null ;
+	}
+
+	if ( userMarkerLabelChoice != activeMarkerLabel ) {
+		activeMarkerLabel = userMarkerLabelChoice ;
+		changeMarkers() ;
+	}
+
+
+}
+
+
+/******************************************************************************************************/
+function processUserMarkerChoice() {
+
+	var userWantsArrow = document.getElementById( "headingArrowCheckbox" ).checked ;
+	var userWantsLabel = document.getElementById( "markerLabelCheckbox" ).checked ;
+
+	if ( userWantsLabel == false ) {
+		document.getElementById( 'verbosityCheckboxDiv' ).style.display = "none" ;
+		document.getElementById( 'verbosityCheckboxBlankDiv' ).style.display = "" ;
+	} else {
+		document.getElementById( 'verbosityCheckboxDiv' ).style.display = "" ;
+		document.getElementById( 'verbosityCheckboxBlankDiv' ).style.display = "none" ;
+	}
+
+	if ( userWantsArrow == true && userWantsLabel == true ) {
+		userGoogleMarkerType = "MarkerWithLabel" ;
+		markerLabelsToCycle = markerLabelsForCycling.allLabels ;
+		if ( userMarkerLabelChoice == "cycle" && referenceToCycleInterval === null ) {
+			referenceToCycleInterval = setInterval( cycleNextMarkerLabel, labelCycleInterval ) ;
+		}
+
+	} else if ( userWantsArrow == true && userWantsLabel == false ) {
+		userGoogleMarkerType = "MarkerImage" ;
+		clearInterval( referenceToCycleInterval ) ;
+		referenceToCycleInterval = null ;
+
+	} else if ( userWantsArrow == false && userWantsLabel == true ) {
+		userGoogleMarkerType = "StyledIconTypes.BUBBLE" ;
+		markerLabelsToCycle = markerLabelsForCycling.allLabels ;
+		if ( userMarkerLabelChoice == "cycle" && referenceToCycleInterval === null ) {
+			referenceToCycleInterval = setInterval( cycleNextMarkerLabel, labelCycleInterval ) ;
+		}
+
+	} else if ( userWantsArrow == false && userWantsLabel == false ) {
+		userGoogleMarkerType = "StyledIconTypes.MARKER" ;
+		markerLabelsToCycle = markerLabelsForCycling.justColor ;
+		if ( userMarkerLabelChoice == "cycle" && referenceToCycleInterval === null ) {
+			referenceToCycleInterval = setInterval( cycleNextMarkerLabel, labelCycleInterval ) ;
+		}
+	}
+
+	if ( userGoogleMarkerType != activeGoogleMarkerType ) {
+		changeMarkers() ;	// Have to do this because we probably have to delete & recreate all markers.
+	}
+}
+
+
+/******************************************************************************************************/
+// Advance to the next marker label, which includes marker text & color updates plus the legend
+function cycleNextMarkerLabel() {
+
+	if ( labelCycleCurrentIndex++ >= markerLabelsToCycle.length - 1 ) { labelCycleCurrentIndex = 0 }
+	activeMarkerLabel = markerLabelsToCycle[ labelCycleCurrentIndex ] ;
+	changeMarkers() ;
+
+}
+
+
+/******************************************************************************************************/
+// Need to delete existing markers if we're changing to a marker type that's different.
+// Example: Change from StyledIconTypes.BUBBLE to standard Marker needs a delete & re-create (unfortunately).
+// This can also be called just to update the markers, for example if we're doing heading arrows and we
+// did a map rotation.
+function changeMarkers() {
+
+	if ( userMarkerLabelChoice == "" ) { return }		// In case we landed on a divider line in the Select list
+
+	// If we got here by a user choice of a static marker type or label and we were cycling, we have to stop the marker auto-changing.
+	if ( userMarkerLabelChoice != "cycle" && referenceToCycleInterval !== null ) {
+		clearInterval( referenceToCycleInterval ) ;
+		referenceToCycleInterval = null ;
+	}
+
+	updateLegend( activeMarkerLabel ) ;
+
+	if ( activeGoogleMarkerType != userGoogleMarkerType ) {
+		deleteAllMarkers() ;
+		document.getElementById( 'stillLoadingDiv' ).innerHTML = "<P><B>Please wait while the map and train data are loaded.</B></P>" ;
+		document.getElementById( 'stillLoadingDiv' ).style.display = "" ;
+		activeGoogleMarkerType = userGoogleMarkerType ;
+		mainLoop() ;
+	} else {					// If we didn't delete everything, just refresh them.
+		for ( var alreadyMappedCoach in alreadyMappedCoaches ) {
+			updateMarker( alreadyMappedCoaches[ alreadyMappedCoach ], alreadyMappedCoach, false ) ;
+		}
+	}
+}
+
+
+
+
+
+
+/******************************************************************************************************/
+function makeNextStopNamePrefix( thisCoachObject ) {
+
+	if ( document.getElementById( "verbosityCheckbox" ).checked == false ) {
+		return "" ;
+	}
+
+	if ( departures[ thisCoachObject.Trip ] && departures[ thisCoachObject.Trip ].Track != "" ) {
+		if ( thisCoachObject.nextStopName.toLowerCase().indexOf( "station" ) !== -1 ) {
+			return ( departures[ thisCoachObject.Trip ].Status + " Track " + departures[ thisCoachObject.Trip ].Track + " " ) ;
+		} else {
+			return ( departures[ thisCoachObject.Trip ].Status + " Track " + departures[ thisCoachObject.Trip ].Track + ", next stop " ) ;
+		}
+	}
+
+	switch( thisCoachObject.nextStopFlag ) {
+
+		case "app":
+			return "Approaching " ;
+
+		case "arr":
+			return "Arriving at " ;
+
+		case "del":
+			return "Delayed at " ;
+
+		case "dep":
+			return "Departed from " ;
+
+		case "pre":
+			return "Predicted at " ;
+
+		case "appFin":
+			return "Approaching destination " ;
+
+		case "arrFin":
+			return "Arriving at destination " ;
+
+		case "preDep":
+			return "Will depart " ;
+
+		case "preArr":
+			return "Predicted to arrive at " ;
+
+		case "schDep":
+			return "Scheduled to depart from " ;
+
+		case "schArr":
+			return "Scheduled to arrive at " ;
+
+		case "sch":
+		default:
+			return "Scheduled from " ;
+	}
+}
+
+/******************************************************************************************************/
+function makeMarkerContent( thisCoachObject, thisCoachNumber, type ) {
+
+	// defaults - will be replaced as needed
+	var markerText = tripMarkerPrefix + thisCoachObject.Trip ;
+	var bgColor    = thisCoachObject.markerDirectionColor ;
+	var textColor  = thisCoachObject.markerDirectionTextColor ;
+
+	switch( activeMarkerLabel ) {
+
+		case "tripandcoach":
+			markerText += " / " + coachMarkerPrefix + thisCoachNumber ;
+			break ;
+
+		case "nextStopName":
+			markerText = makeNextStopNamePrefix( thisCoachObject ) + thisCoachObject.nextStopName ;
+			break ;
+
+		case "destination":
+			markerText = destinationMarkerPrefix + thisCoachObject.Destination ;
+			if ( destinationMarkerPrefix != "" ) {
+				markerText = ( thisCoachObject.direction == "O" ? "Outbound " : "Inbound " ) + markerText ;
+			}
+			break ;
+
+		case "coach":
+			markerText = coachMarkerPrefix + thisCoachNumber ;
+			bgColor   = thisCoachObject.markerCoachColor ;
+			textColor = thisCoachObject.markerCoachTextColor ;
+			break ;
+
+		case "lateness":
+			markerText = ( latenessMarkerPostfix != "" ? thisCoachObject.onTimeStatusText : thisCoachObject.markerLatenessLabel ) ;
+			bgColor   = thisCoachObject.markerLatenessColor ;
+			textColor = thisCoachObject.markerLatenessTextColor ;
+			break ;
+
+		case "speed":
+			markerText = thisCoachObject.Speed  + speedMarkerPostfix ;
+			bgColor   = thisCoachObject.markerSpeedColor ;
+			textColor = thisCoachObject.markerSpeedTextColor ;
+			break ;
+
+		default:
+			break ;
+
+	}
+
+	if ( type == "StyledIcon" ) {
+		return 	( { 
+				color: bgColor,
+				fore:  textColor,
+				text:  markerText
+			} ) ;
+	} else if ( type == "MarkerWithLabel" ) {
+		return ( {
+				labelContent: markerText,
+				labelStyle: {
+					backgroundColor: "#" + bgColor,
+					color: "#" + textColor
+				}
+			} ) ;
+	}
+
+}
+
+
+
+/******************************************************************************************************/
+// Example!
+function createStyle() {
+	return new StyledIcon(
+		StyledIconTypes.BUBBLE,
+			{ color: "#95AA7B",
+			  text:  "click me!",
+			  fore: "#ffffff"
+			}
+		);
+}
+// var marker4 = new StyledMarker( { styleIcon: createStyle(), position: new google.maps.LatLng( 37.2, -121.88 ), map: map } );
+// var marker5 = new StyledMarker( { styleIcon: createStyle(), position: new google.maps.LatLng( 37.1, -121.88 ), map: map } );
+
+
+
+/******************************************************************************************************/
+function updateMarker( thisCoachObject, thisCoachNumber, shouldHandleMotion ) {
+
+	var newMarkerContent = {} ;
+
+	if ( activeGoogleMarkerType == "StyledIconTypes.BUBBLE" || activeGoogleMarkerType == "StyledIconTypes.MARKER" ) {
+
+		newMarkerContent = makeMarkerContent( thisCoachObject, thisCoachNumber, "StyledIcon" ) ;
+
+		// Make sure the colors are up-to-date
+		if ( markers[ thisCoachNumber ].styleIcon.get( "color" ) != newMarkerContent.color ) {
+			markers[ thisCoachNumber ].styleIcon.set( "color", newMarkerContent.color ) ;
+			markers[ thisCoachNumber ].styleIcon.set( "fore",  newMarkerContent.fore  ) ;
+		}
+
+		// Make sure the marker text is up-to-date - but only the 'bubble' type
+		if ( activeGoogleMarkerType == "StyledIconTypes.BUBBLE" ) {
+			if ( markers[ thisCoachNumber ].styleIcon.get( "text" ) != newMarkerContent.text ) {
+				markers[ thisCoachNumber ].styleIcon.set( "text", newMarkerContent.text ) ;
+			}
+		} else {
+			markers[ thisCoachNumber ].styleIcon.set( "text", "" ) ;
+		}
+	}
+
+	if ( activeGoogleMarkerType == "MarkerWithLabel" ) {
+
+		newMarkerContent = makeMarkerContent( thisCoachObject, thisCoachNumber, "MarkerWithLabel" ) ;
+
+		// Make sure the marker text is up-to-date
+		if ( markers[ thisCoachNumber ].get( "labelContent" ) != newMarkerContent.labelContent ) {
+			markers[ thisCoachNumber ].set( "labelContent", newMarkerContent.labelContent ) ;
+			markers[ thisCoachNumber ].set( "labelAnchor", new google.maps.Point( roundToDecimalPlaces( newMarkerContent.labelContent.length * 2.5, 0 ) + 4, -10 ) ) ;
+		}
+
+		// Make sure the colors are up-to-date
+		if ( markers[ thisCoachNumber ].get( "labelStyle" ).backgroundColor != newMarkerContent.labelStyle.backgroundColor ) {
+			markers[ thisCoachNumber ].set( "labelStyle", newMarkerContent.labelStyle ) ;
+		}
+	}
+
+	if ( motionPaths[ thisCoachNumber ] && shouldHandleMotion === true ) {
+		motionPaths[ thisCoachNumber ].setMap( null ) ;
+		motionPaths[ thisCoachNumber ] = null ;
+	}
+
+	markers[ thisCoachNumber ].set( 'infoWindowContent', thisCoachObject.infoWindowContent ) ;	// Set the current data onto the marker, which is then pulled in the mouseover listener!
+
+	if ( userCoachToFollow == thisCoachNumber ) {
+		updateTrainInfoDiv( thisCoachNumber, "Coach" ) ;
+	}
+
+	var currentLatLngPosition = markers[ thisCoachNumber ].getPosition() ;
+	var newLatLngPosition = new google.maps.LatLng( thisCoachObject.Latitude, thisCoachObject.Longitude ) ;
+
+	// This is the critical part - when there's a new position!!
+	if ( shouldHandleMotion === true && newLatLngPosition.toString() != currentLatLngPosition.toString() ) {	// If we are here to just update the marker type / data but not the position, we're done!
+
+		// This might not be needed because we've copied the entire new object in... this is a To Do / to be figured out
+		//alreadyMappedCoaches[ thisCoachNumber ].Latitude  = thisCoachObject.Latitude ;
+		//alreadyMappedCoaches[ thisCoachNumber ].Longitude = thisCoachObject.Longitude ;
+
+		if ( ! motionPaths[ thisCoachNumber ] && markers[ thisCoachNumber ].getVisible() == true ) {		// Only make a motion path if there's not one already, and only if the marker is visible.
+			motionPaths[ thisCoachNumber ] = makeNewPath( currentLatLngPosition, newLatLngPosition ) ;
+		}
+
+		markers[ thisCoachNumber ].lastMovementTime = Math.floor( new Date / 1000 ) ;
+		var newDate0 = new Date( 0 ) ;	// This 'newDate0' thing is just for the logging.
+		newDate0.setUTCSeconds( markers[ thisCoachNumber ].lastMovementTime ) ;
+//		log( "<font color=\#CC0000\">Updating position</font> of <a href=\"#\" onClick=\"startFollowingCoach( " + thisCoachNumber + " )\">coach " + thisCoachNumber + "</a> / Train " + thisCoachObject.Trip + " : " + thisCoachObject.Latitude + " : " + thisCoachObject.Longitude + " / Data age: " + thisCoachObject.dataAgeSeconds + " sec. / Last movement " + ( Math.floor( new Date / 1000 ) - markers[ thisCoachNumber ].lastMovementTime ) + " sec. ago: " + newDate0 ) ;			
+		log( "<font color=\#CC0000\">Updating position</font> of " + returnCoachLinkHTML( 'startFollowingCoach', thisCoachNumber ) + " / Train " + thisCoachObject.Trip + " : " + thisCoachObject.Latitude + " : " + thisCoachObject.Longitude + " / Data age: " + thisCoachObject.dataAgeSeconds + " sec. / Last movement " + ( Math.floor( new Date / 1000 ) - markers[ thisCoachNumber ].lastMovementTime ) + " sec. ago: " + newDate0 ) ;			
+
+//previous	if ( isMobilePlatform != true && markers[ thisCoachNumber ].getVisible() == true ) {
+		if ( markers[ thisCoachNumber ].getVisible() == true ) {
+			animate( markers[ thisCoachNumber ], thisCoachNumber, newLatLngPosition ) ;
+		} else {
+			markers[ thisCoachNumber ].setPosition( newLatLngPosition ) ;	// If the marker is hidden, skip the animation and just move it directly to the new position.
+		}
+
+		markers[ thisCoachNumber ].setTitle( "Double-click to zoom in/out on Coach " + thisCoachNumber + ", Last movement: " + shortTime( 'now' ) + ", Lat:" + thisCoachObject.Latitude + ", Long:" + thisCoachObject.Longitude ) ;
+
+	} else {
+//test		if ( markers[ thisCoachNumber ].getZIndex() !== 1 ) {
+//test			markers[ thisCoachNumber ].setZIndex( 1 ) ;
+//test		}
+		// next three lines just for logging
+		var newDate0 = new Date( 0 ) ;
+		newDate0.setUTCSeconds( markers[ thisCoachNumber ].lastMovementTime ) ;
+//		log( "No position change <a href=\"#\" onClick=\"startFollowingCoach( " + 				thisCoachNumber + " )\">coach " + thisCoachNumber + "</a> / Train " + thisCoachObject.Trip 									+ " / Data age: " + thisCoachObject.dataAgeSeconds + " sec. / Last movement " + ( Math.floor( new Date / 1000 ) - markers[ thisCoachNumber ].lastMovementTime ) + " sec. ago: " + newDate0 ) ;
+		log( "No position change " + returnCoachLinkHTML( 'startFollowingCoach', thisCoachNumber ) + " / Train " + thisCoachObject.Trip 									+ " / Data age: " + thisCoachObject.dataAgeSeconds + " sec. / Last movement " + ( Math.floor( new Date / 1000 ) - markers[ thisCoachNumber ].lastMovementTime ) + " sec. ago: " + newDate0 ) ;
+	}
+
+	// Optimally, update the marker heading arrow icon **AFTER** the movement. It looks better... but that would mean trying to run after the async animation. Ugh.
+	if ( activeGoogleMarkerType == "MarkerImage" ) {
+		var compassHeadingArrowURL = makeCompassHeadingArrowURL( thisCoachObject.Heading ) ;
+		if ( markers[ thisCoachNumber ].getIcon().url != compassHeadingArrowURL ) {
+			markers[ thisCoachNumber ].setIcon(
+							    {
+								url: compassHeadingArrowURL,
+								anchor:	new google.maps.Point( 17, 17 ),
+								origin:	null,
+								size:	null,
+								scaledSize: null
+							    }
+							  ) ;
+		}
+	}
+	if ( activeGoogleMarkerType == "MarkerWithLabel" ) {
+		var compassHeadingArrowURL = makeCompassHeadingArrowURL( thisCoachObject.Heading ) ;
+		if ( markers[ thisCoachNumber ].getIcon().url != compassHeadingArrowURL ) {
+			markers[ thisCoachNumber ].setIcon( {
+								url: compassHeadingArrowURL,
+								anchor:	new google.maps.Point( 17, 17 )
+							} ) ;
+		}
+	}
+
+	// Do this even if there's no motion above, because it makes the new marker text more readable.
+	if ( userCoachToFollow == thisCoachNumber ) {
+		smartPanToMarker( markers[ thisCoachNumber ] ) ;
+	}
+
+}
+
+
+/******************************************************************************************************/
+function processUserQueryOptions( rawJSON_trainsHashByTrip ) {
+
+	if ( queryStringCoachToFollow != null ) {
+		if ( alreadyMappedCoaches[ queryStringCoachToFollow ] ) {
+			document.getElementById( 'userErrorDiv' ).innerHTML = "" ;
+			if ( userCoachToFollow != queryStringCoachToFollow ) {
+				startFollowingCoach( queryStringCoachToFollow ) ;
+				return ;	// If we've just started following a coach, that takes precident. No need to check for a train to follow.
+			}
+		} else {
+			document.getElementById( 'userErrorDiv' ).innerHTML = "<P>You selected Coach "
+										+ queryStringCoachToFollow
+										+ " in this page URL, but that coach is not in the data feed right now, or doesn't have location information." ;
+		}
+	}
+
+	if ( queryStringTrainToFollow != null ) {
+		if ( rawJSON_trainsHashByTrip[ queryStringTrainToFollow ] ) {
+			document.getElementById( 'userErrorDiv' ).innerHTML = "" ;
+			if ( rawJSON_trainsHashByTrip[ queryStringTrainToFollow ].Vehicles.length == 1 ) {
+				startFollowingCoach( rawJSON_trainsHashByTrip[ queryStringTrainToFollow ].Vehicles[ 0 ] ) ;
+			} else if ( rawJSON_trainsHashByTrip[ queryStringTrainToFollow ].Vehicles.length > 1 ) {
+				document.getElementById( 'userErrorDiv' ).innerHTML = "<P>You selected Train "
+											+ queryStringTrainToFollow
+											+ " in this page URL, but that train number is being sent by "
+											+ rawJSON_trainsHashByTrip[ queryStringTrainToFollow ].Vehicles.length
+											+ " different coaches! Instead, you should choose from the menu of trip numbers below." ;
+				queryStringTrainToFollow = null ;
+			}
+		} else {
+			document.getElementById( 'userErrorDiv' ).innerHTML = "<P>You selected Train "
+										+ queryStringTrainToFollow
+										+ " in this page URL, but that train is not in the data feed right now, or doesn't have location information." ;
+		}
+	}
+
+
+}
+
+
+/******************************************************************************************************/
+function processUserHidingChoice() {
+
+	var showMovingOptionListValue   = document.getElementById( 'showMovingOptionList'   ).value ;
+	var showUpcomingOptionListValue = document.getElementById( 'showUpcomingOptionList' ).value ;
+	totalTrainsVisible = 0 ; totalTrainsHidden = 0 ;
+	var madeAnUpdate = false ;
+
+	for ( var thisCoachNumber in alreadyMappedCoaches ) {
+		if (
+		     userCoachToFollow != thisCoachNumber &&
+		     (
+		       ( showMovingOptionListValue   != 0 && ( Math.floor( new Date / 1000 ) - markers[ thisCoachNumber ].lastMovementTime ) > showMovingOptionListValue ) ||
+		       ( showUpcomingOptionListValue != 0 && ( alreadyMappedCoaches[ thisCoachNumber ].nextStopTime - Math.floor( new Date / 1000 ) ) > showUpcomingOptionListValue )
+		     )
+		   ) {
+			totalTrainsHidden++ ;
+			if ( markers[ thisCoachNumber ].getVisible() == true ) {
+				debug( "Hiding "  + thisCoachNumber + " because limit is " + showMovingOptionListValue + ", age = " + ( Math.floor( new Date / 1000 ) - markers[ thisCoachNumber ].lastMovementTime ) ) ;
+				markers[ thisCoachNumber ].setVisible( false ) ;
+				if ( motionPaths[ thisCoachNumber ] ) {
+					motionPaths[ thisCoachNumber ].setMap( null ) ;
+					motionPaths[ thisCoachNumber ] = null ;
+				}
+				madeAnUpdate = true ;
+			}
+		} else {
+			totalTrainsVisible++ ;
+			if ( markers[ thisCoachNumber ].getVisible() == false ) {
+				debug( "Showing " + thisCoachNumber + " because limit is " + showMovingOptionListValue + ", age = " + ( Math.floor( new Date / 1000 ) - markers[ thisCoachNumber ].lastMovementTime ) ) ;
+				markers[ thisCoachNumber ].setVisible( true ) ;
+				madeAnUpdate = true ;
+			}
+		}
+	}
+
+	if ( madeAnUpdate == true ) {
+		markerCluster.repaint() ;	// This could be expensive, so only repaint if there's been changes.
+	}
+
+	// All the rest is page text and/or button updates.
+	if ( showMovingOptionListValue != 0 || showUpcomingOptionListValue != 0 ) {
+		document.getElementById( 'numberOfHiddenTrainsDiv' ).innerHTML = "Total mapped trains:&nbsp;" + alreadyMappedCoachesLength + " / Visible:&nbsp;" + totalTrainsVisible + " / Hidden:&nbsp;" + totalTrainsHidden ;
+
+	} else {
+		document.getElementById( 'numberOfHiddenTrainsDiv' ).innerHTML = "Total mapped trains:&nbsp;" + alreadyMappedCoachesLength ;
+	}
+	if ( totalTrainsHidden == 0 && alreadyMappedCoachesLength != 0 ) {	// There are trains, and none hidden
+		document.getElementById( "doPanZoomToFitButton" ).innerHTML = "All " + alreadyMappedCoachesLength + "  trains" ;
+	} else if ( totalTrainsVisible != 0 && totalTrainsHidden != 0 && alreadyMappedCoachesLength != 0 ) {	// There are trains, and some are hidden
+		document.getElementById( "doPanZoomToFitButton" ).innerHTML = "the " + totalTrainsVisible + " visible trains" ;
+	} else if ( totalTrainsVisible == 0 && totalTrainsHidden != 0 && alreadyMappedCoachesLength != 0 ) {	// There are trains, and all are hidden!
+		document.getElementById( "doPanZoomToFitButton" ).innerHTML = "All " + totalTrainsHidden + " trains are hidden!" ;
+	} else if ( alreadyMappedCoachesLength == 0 ) {		// Nothing to show!
+		document.getElementById( "doPanZoomToFitButton" ).innerHTML = "No trains!" ;
+	}
+}
+
+
+
+/******************************************************************************************************/
+function animate( markerToMove, coachNumberBeingMoved, newMarkerLatLng ) {
+
+	var moveFromLat = markerToMove.getPosition().lat() ;
+	var moveFromLng = markerToMove.getPosition().lng() ;
+	var moveToLat = newMarkerLatLng.lat() ;
+	var moveToLng = newMarkerLatLng.lng() ;
+
+	debug( "Animating " + coachNumberBeingMoved + " - From: " + moveFromLat + " " + moveFromLng + " To: " + moveToLat + " " + moveToLng ) ;
+
+	var percentStep = 0.01 ;		// Gives 100 steps for nicest, most smooth animation
+	var stepTimeOutMS = 20 ;
+	if ( totalTrainsVisible > 20 ) {
+		percentStep = 0.02 ;		// Gives 50 steps, better for more than 20 markers
+		stepTimeOutMS = 40 ;
+	}
+	if ( totalTrainsVisible > 40 ) {
+		percentStep = 0.04 ;		// Gives 25 steps, best for more than 40 markers
+		stepTimeOutMS = 50 ;
+	}
+	if ( totalTrainsVisible > 15 ) {
+		if ( ( mainMapObject.getMapTypeId() == 'hybrid' || mainMapObject.getMapTypeId() == 'satellite' ) && mainMapObject.getZoom() > 16 ) {
+			percentStep = 0.02 ;	// Gives 50 steps, best for when there's a high zoom in on satellite - make it reasonably smooth!
+			stepTimeOutMS = 150 ;	// Longer to load & pan the images when there's big data to download
+		}
+	}
+	if ( isMobilePlatform == true ) {
+		percentStep = 0.10 ;		// Gives 10 steps, best for mobile platforms which probably have limited CPU power
+		stepTimeOutMS = 400 ;
+	}
+
+	var steps = [] ;
+	for ( var percentCounter = 0.0 ; percentCounter <= 1 ; percentCounter += percentStep ) {
+		var stepLat = moveFromLat + percentCounter * ( moveToLat - moveFromLat ) ;
+		var stepLng = moveFromLng + percentCounter * ( moveToLng - moveFromLng ) ;
+		steps.push( new google.maps.LatLng( stepLat, stepLng ) ) ;
+	}
+	steps.push( newMarkerLatLng ) ;		// Have to make sure we hit the exact new position
+
+	debug( "Coach " + coachNumberBeingMoved + ", Steps: " + steps.length ) ;
+
+	var quarterTheWay 	= Math.floor( steps.length * 0.25 ) ;
+	var halfTheWay 		= Math.floor( steps.length / 2 ) ;
+	var threequartersTheWay = Math.floor( steps.length * 0.75 ) ;
+	var stepCounter = 0 ;
+	var doTheMove = function() {
+		if ( stepCounter < steps.length ) {
+			markerToMove.setPosition( steps[ stepCounter ] ) ;
+			if ( stepCounter == quarterTheWay || stepCounter == halfTheWay || stepCounter == threequartersTheWay ) {
+				markerCluster.repaint() ;
+			}
+			if ( userCoachToFollow == coachNumberBeingMoved ) {
+				mainMapObject.panTo( steps[ stepCounter ] ) ;		// Follow a train - this is a big feature!
+			}
+			var thingy = window.setTimeout(
+				function() {
+					stepCounter++ ;
+					doTheMove() ;
+				}, 
+				stepTimeOutMS 
+			)
+		} else {								// This 'else' happens only once at the end of the animation
+			markerToMove.set( 'beingAnimatedNow', false ) ;
+			markerCluster.repaint() ;					// Repaint again at the very end.
+			if ( userCoachToFollow == coachNumberBeingMoved ) {
+				smartPanToMarker( markers[ coachNumberBeingMoved ] ) ;	// If we're on a small screen, adjust for the marker text length at the end.
+			}
+		}
+	}
+	markerToMove.set( 'beingAnimatedNow', true ) ;
+	doTheMove() ;
+}
+
+
+
+/******************************************************************************************************/
+function makeCompassHeadingArrowURL( headingValue ) {
+
+	var updatedHeading = ( mainMapObject.getHeading() ? ( headingValue - mainMapObject.getHeading() ) : headingValue ) ;
+	return ( compassHeadingArrowBaseURL + compass_from_azimuth( updatedHeading ) + ".png" ) ;
+
+}
+
+
+
+/******************************************************************************************************/
+function makeNewPath( startLatLong, endLatLong ) {
+
+	var lineArrow = {
+		path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+		strokeColor: "#FF0000",
+		fillColor:   "#FF0000",
+//test		strokeColor: ( activeGoogleMarkerType == "MarkerImage" ? "#8B0000" : "#FF0000" ),
+//test		fillColor:   ( activeGoogleMarkerType == "MarkerImage" ? "#8B0000" : "#FF0000" ),
+		fillOpacity: 1
+	}
+
+	var thisNewPath = new google.maps.Polyline( {
+		icons: [ {
+			icon: lineArrow,
+			offset: "100%"
+		} ],
+		path: [
+			startLatLong,
+			endLatLong
+		],
+		strokeColor: "#FF0000",
+		strokeWeight: ( activeGoogleMarkerType == "MarkerImage" ? 2 : 4 )
+	} ) ;
+
+	google.maps.event.addListener( thisNewPath, 'click', function( thisNewPath ) {
+		return function() {
+			mainMapObject.panTo( endLatLong ) ;
+		}
+	} ( thisNewPath ) ) ;
+
+	if ( mainMapObject.getZoom() > 6 ) {
+		thisNewPath.setMap( mainMapObject ) ;	// Only put the path on the map if we're not zoomed in too close.
+	}
+
+	return thisNewPath ;
+}
+
+
+
+/******************************************************************************************************/
+function updateCoachesOptionList() {
+
+	var previousSelectedCoach = document.getElementById( 'coachesOptionList' ).value ;
+
+	var tempCoachArray = [] ;
+	for ( var myAlreadyMappedCoach in alreadyMappedCoaches ) {
+		tempCoachArray.push( myAlreadyMappedCoach ) ;
+	}
+	tempCoachArray.sort() ;
+
+	$( "#coachesOptionList" ).empty() ;
+	$( "#coachesOptionList" ).append( '<option value="">Pick one of the ' + tempCoachArray.length + ' coaches...</option>' ) ;
+	for ( var counter = 0 ; counter < tempCoachArray.length ; counter++ ) {
+		$( "#coachesOptionList" ).append( '<option value="' + tempCoachArray[ counter ] + '">' + tempCoachArray[ counter ] +
+				' (Train ' + alreadyMappedCoaches[ tempCoachArray[ counter ] ].Trip + ')</option>' ) ;
+	}
+
+	if ( userCoachToFollow ) {
+		$( "#coachesOptionList" ).val( userCoachToFollow ) ;		// Just in case we're following something that didn't already update the menu.
+	}
+
+	if ( previousSelectedCoach != "" ) {					// If there was a coach we were following...
+		$( "#coachesOptionList" ).val( previousSelectedCoach ) ;	// then select that coach again.
+
+		if ( ! alreadyMappedCoaches[ previousSelectedCoach ] ) {	// If that coach is no longer in the feed...
+			stopFollowingTrains() ;					// then we can't follow it!
+			window.alert( "Coach " + previousSelectedCoach + " is no longer available." );
+		}
+	}
+
+}
+
+
+
+/******************************************************************************************************/
+function updateTrainsOptionList( JSONdata ) {
+
+	var previousSelectedTrain = document.getElementById( 'trainsOptionList' ).value ;
+
+	var tempTripArray = [] ;
+	for ( var trip in JSONdata.trainsHashByTrip ) {
+		tempTripArray.push( trip ) ;
+	}
+
+	// Custom sort that handles alpha-numeric values (like "P515" on the B & A line) but also sorts numbers by value
+	var regexAlpha = /[^a-zA-Z]/g ;
+	var regexNumbr = /[^0-9]/g ;
+	function sortAlphaNum( a, b ) {
+		var aA = a.replace( regexAlpha, "" ) ;
+		var bA = b.replace( regexAlpha, "" ) ;
+		if ( aA === bA ) {
+			var aN = parseInt( a.replace( regexNumbr, "" ), 10 ) ;
+			var bN = parseInt( b.replace( regexNumbr, "" ), 10 ) ;
+			return aN === bN ? 0 : aN > bN ? 1 : -1 ;
+		} else {
+			return aA > bA ? 1 : -1 ;
+		}
+	}
+	tempTripArray.sort( sortAlphaNum ) ;
+
+	$( "#trainsOptionList" ).empty() ;
+	$( "#trainsOptionList" ).append( '<option value="">Pick one of the ' + tempTripArray.length + ' train trips...</option>' ) ;
+	for ( var tempTripArrayIndex = 0 ; tempTripArrayIndex < tempTripArray.length ; tempTripArrayIndex++ ) {
+		var trainOptionText = "" ;
+		for ( var dupesIndex = 0 ; dupesIndex < JSONdata.trainsHashByTrip[ tempTripArray[ tempTripArrayIndex ] ].Vehicles.length ; dupesIndex++ ) {
+			trainOptionText += '<option value="' + JSONdata.trainsHashByTrip[ tempTripArray[ tempTripArrayIndex ] ].Vehicles[ dupesIndex ] + '">' + tempTripArray[ tempTripArrayIndex ] +
+						  ' (Coach ' + JSONdata.trainsHashByTrip[ tempTripArray[ tempTripArrayIndex ] ].Vehicles[ dupesIndex ] + ')' ;
+			trainOptionText += ( JSONdata.trainsHashByTrip[ tempTripArray[ tempTripArrayIndex ] ].Vehicles.length > 1 ) ? ' ** Duplicate trip number' : '' ;
+			trainOptionText += '</option>' ;
+		}
+		$( "#trainsOptionList" ).append( trainOptionText ) ;
+	}
+
+	if ( userCoachToFollow ) {
+		$( "#trainsOptionList" ).val( userCoachToFollow ) ;		// Just in case we're following something that didn't already update the menu.
+	}
+
+	if ( previousSelectedTrain != "" ) {
+		$( "#trainsOptionList" ).val( previousSelectedTrain ) ;		// This will override the above setting, in case we're conflicting. This one takes precident.
+	}
+
+}
+
+
+
+/******************************************************************************************************/
+function makeNewMarker( newCoachObject, thisCoachNumber ) {
+
+	var myMarker ;
+	var newMarkerContent = {} ;
+
+	switch( activeGoogleMarkerType ) {
+
+		case "StyledIconTypes.MARKER":
+		case "StyledIconTypes.BUBBLE":
+			newMarkerContent = makeMarkerContent( newCoachObject, thisCoachNumber, "StyledIcon" ) ;
+			if ( activeGoogleMarkerType == "StyledIconTypes.MARKER" ) {
+				newMarkerContent.text = "" ;	// The plain marker gets no text, just color.
+			}
+			myMarker = new StyledMarker( {
+				styleIcon: new StyledIcon( 
+					eval( activeGoogleMarkerType ), 
+					newMarkerContent
+				)
+			} ) ;
+			break ;
+
+		case "MarkerImage":
+			var arrowURL = makeCompassHeadingArrowURL( newCoachObject.Heading ) ;
+			var myIcon = {
+					url:	arrowURL,
+					anchor:	new google.maps.Point( 17, 17 ),
+					origin:	null,
+					size:	null,
+					scaledSize: null
+				     } ;
+			myMarker = new google.maps.Marker( {
+				icon: myIcon
+			} ) ;
+			break ;
+
+		case "MarkerWithLabel":
+			var arrowURL = makeCompassHeadingArrowURL( newCoachObject.Heading ) ;
+			newMarkerContent = makeMarkerContent( newCoachObject, thisCoachNumber, "MarkerWithLabel" ) ;
+			myMarker = new MarkerWithLabel( {
+				labelInBackground: true,
+				draggable: 	false,
+				icon: {
+					url: arrowURL,
+					anchor: new google.maps.Point( 17, 17 )
+				},
+				labelAnchor: 	new google.maps.Point( roundToDecimalPlaces( newMarkerContent.labelContent.length * 2.5, 0 ) + 4, -10 ),
+				labelClass: 	'MarkerWithLabelClass',
+				labelContent: 	newMarkerContent.labelContent,
+				labelStyle: 	newMarkerContent.labelStyle
+			} ) ;
+			break ;
+	}
+
+	myMarker.setPosition( new google.maps.LatLng( newCoachObject.Latitude, newCoachObject.Longitude ) ) ;
+	myMarker.setTitle( "Double-click to zoom in/out on Coach " + thisCoachNumber + ", Lat:" + newCoachObject.Latitude + ", Long:" + newCoachObject.Longitude ) ;
+	myMarker.set( 'infoWindowContent', newCoachObject.infoWindowContent ) ;
+	myMarker.set( 'coachNumber', thisCoachNumber ) ;
+
+	google.maps.event.addListener( myMarker, ( isMobilePlatform == true ? 'click' : 'mouseover' ), function( newMarker ) {
+		return function() {
+			markerInfoWindow.setContent( this.get( 'infoWindowContent' ) );
+			markerInfoWindow.open( mainMapObject, newMarker ) ;
+			markerWithInfoWindow = newMarker ;
+			clearTimeout( infoWindowCloseTimeoutRef ) ;
+			infoWindowCloseTimeoutRef = null ;
+//to-do			adjustMarkerIndex( newMarker, 1 ) ; 				// Need to figure out how to handle this without flickering.
+		}
+	} ( myMarker ) ) ;
+
+	google.maps.event.addListener( myMarker, ( isMobilePlatform == true ? 'click' : 'mouseout' ), function( thisMarker ) {
+		return function() {
+			infoWindowCloseTimeoutRef = window.setTimeout(
+				function() {
+					if ( isMobilePlatform == true && markerWithInfoWindow != null && ! userCoachToFollow && ! userTrainToFollow ) {
+						smartPanToMarker( thisMarker ) ;	// Only "smart pan" if it's a small screen, and we know what marker had the window,
+					}						// and we are NOT following a coach / train.
+					markerWithInfoWindow = null ;
+					markerInfoWindow.close() ;
+				} ,
+				( isMobilePlatform == true ? 7000 : 3000 )
+			) ;
+		}
+	} ( myMarker ) ) ;
+
+//	google.maps.event.addListener( myMarker, ( isMobilePlatform == true ? 'dblclick' : 'click' ), function( newMarker ) {
+	google.maps.event.addListener( myMarker, 'dblclick', function( newMarker ) {
+		return function() {
+			markerWithInfoWindow = null ;
+			markerInfoWindow.close() ;
+			clearTimeout( infoWindowCloseTimeoutRef ) ;
+			infoWindowCloseTimeoutRef = null ;
+			if ( mainMapObject.getZoom() > 15 ) {
+				mainMapObject.setZoom( mainMapObject.getZoom() - 5 ) ;
+			} else {
+				mainMapObject.setZoom( 16 ) ;
+				smartPanToMarker( newMarker ) ;
+			}
+		}
+	} ( myMarker ) ) ;
+
+	google.maps.event.addListener( myMarker, 'rightclick', function( newMarker ) {
+		return function() {
+			if ( this.get( 'coachNumber' ) ) {
+				startFollowingCoach( this.get( 'coachNumber' ) ) ;
+			}
+		}
+	} ( myMarker ) ) ;
+
+//to-do	myMarker.setZIndex( 1 ) ;
+	alreadyMappedCoachesLength++ ;
+	didTrainListChange = true ;
+
+//	log( "<font color=\#00CC00\">Adding</font> <a href=\"#\" onClick=\"startFollowingCoach( " + thisCoachNumber + " )\">coach " + thisCoachNumber + "</a> / Train " + newCoachObject.Trip + " : " + newCoachObject.Latitude + " : " + newCoachObject.Longitude + " / Data age: " + newCoachObject.dataAgeSeconds + " sec." ) ;
+//	console.log( returnCoachLinkHTML( 'startFollowingCoach', thisCoachNumber ) ) ;
+	log( "<font color=\#00CC00\">Adding</font> " + returnCoachLinkHTML( 'startFollowingCoach', thisCoachNumber ) + " / Train " + newCoachObject.Trip + " : " + newCoachObject.Latitude + " : " + newCoachObject.Longitude + " / Data age: " + newCoachObject.dataAgeSeconds + " sec." ) ;
+
+	markerCluster.addMarker( myMarker ) ;
+	myMarker.lastMovementTime = Math.floor( new Date / 1000 ) ;
+
+	return myMarker ;
+}
+
+
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+/* This is the main function that kicks off everything else. */
+
+$(document).ready(
+	function() {
+		initializeTheMap() ;
+		initOptionsAndActions() ;
+		setMarkerTextVerbosity() ;
+		processUserMarkerChoice() ;
+		processUserLabelChoice() ;
+		mainLoop() ;
+		setInterval( mainLoop, updateInterval ) ;
+		if ( isMobilePlatform === true ) { 
+			initLocationService() ;
+			openLocationInfoWindow() ; 
+		}
+		setInterval( checkLastMainLoop, 9000 ) ;
+		if ( window.location.pathname.toLowerCase().indexOf( "dev" ) !== -1 ) {
+			document.getElementById( "clustersOffButton" ).click() ;	// For dev version, turn clusters off - using the UI itself!
+		}
+	}
+) ;
+
+
+/******************************************************************************************************/
+// Make sure any interval delays aren't too excessive with a quick check.
+// This is mostly for mobile devices - for example iOS seems to stop all Javascript processing
+// when the page is not in the foreground. This shorter interval and quick check of last load
+// will keep a mobile device user from waiting for an overdue data load.
+function checkLastMainLoop() {
+	//console.log( "checkLastMainLoop() at " + new Date + ": last mainLoop " + ( Math.floor( new Date / 1000 ) - lastMainLoopTime ) + " sec. ago" ) ;
+	if ( mainLoopRunning === false && ( Math.floor( new Date / 1000 ) - lastMainLoopTime ) > ( updateInterval * 2 / 1000 ) ) {
+		mainLoop() ;
+	}
+}
+
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+function initializeTheMap() {
+
+	var mainMapObjectOptions = {
+		center: new google.maps.LatLng( massStateHouseLat, massStateHouseLng ),
+		zoom: 11,
+		scaleControl: true,
+		streetViewControl: true,
+		streetViewControlOptions: {
+			position: google.maps.ControlPosition.TOP_RIGHT
+		},
+		zoomControl:  true,
+		zoomControlOptions: {
+			position: google.maps.ControlPosition.RIGHT_TOP
+		},
+		panControlOptions: {
+			position: google.maps.ControlPosition.RIGHT_TOP
+		},
+		mapTypeId: google.maps.MapTypeId.ROADMAP
+	} ;
+
+	document.getElementById( "map_canvas" ).style.display = "" ;	// If it had been display = none, un-hide it.
+	document.getElementById( "map_canvas" ).innerHTML = "" ;	// Clear out the "Map is still loading" text.
+	mainMapObject = new google.maps.Map( document.getElementById( 'map_canvas' ), mainMapObjectOptions ) ;
+	
+	if ( lastMainLoopTime === 0 ) {
+		if ( isMobilePlatform ) {
+			document.getElementById( 'stillLoadingDiv' ).style.fontSize = "x-small" ;
+			mainMapObject.controls[ google.maps.ControlPosition.LEFT_CENTER ].push( stillLoadingDiv );
+		} else {
+			mainMapObject.controls[ google.maps.ControlPosition.TOP_CENTER ].push( stillLoadingDiv );
+		}
+		document.getElementById( 'stillLoadingDiv' ).style.display = "" ;
+	}
+	
+	var transitLayer = new google.maps.TransitLayer() ;
+	transitLayer.setMap( mainMapObject ) ;
+
+	if ( isMobilePlatform ) {
+		document.getElementById( 'map_canvas' ).style.height = '100%' ;
+		mainMapObject.setOptions( {
+			zoomControlOptions: {
+				style: google.maps.ZoomControlStyle.SMALL,
+				position: google.maps.ControlPosition.RIGHT_BOTTOM
+			}
+		} ) ;
+	}
+
+	// The purple route tracks!!
+	var trainsRouteMapLayer = new google.maps.KmlLayer( "http://" + window.location.host + "/~wuensch/T/data/Commuter_Rail_Lines.kml",    { clickable:false, preserveViewport:true, suppressInfoWindows:true } ) ;
+	trainsRouteMapLayer.setMap( mainMapObject ) ;
+	var trainsRouteMapLayerWickford = new google.maps.KmlLayer( "http://" + window.location.host + "/~wuensch/T/data/Commuter_Rail_Line_Providence-to-WickfordJunction_by_Stefan.kml",    { clickable:false, preserveViewport:true, suppressInfoWindows:true } ) ;
+	trainsRouteMapLayerWickford.setMap( mainMapObject ) ;
+
+	var capeFlyer = new google.maps.KmlLayer( "http://" + window.location.host + "/~wuensch/T/data/Proposed_Commuter_Rail_Lines_2013-06-12_Hyannis-only.kml",    { clickable:true, preserveViewport:true, suppressInfoWindows:false } ) ;
+	capeFlyer.setMap( mainMapObject ) ;
+	var proposedLines = new google.maps.KmlLayer( "http://" + window.location.host + "/~wuensch/T/data/Proposed_Commuter_Rail_Lines_2013-10-05.kml",    { clickable:true, preserveViewport:true, suppressInfoWindows:false } ) ;
+	proposedLines.setMap( mainMapObject ) ;
+
+	// Have the stations load last, in the hope that the T symbols will load on TOP of the route tracks. They sometimes don't, and I don't know why!!!
+	var trainsStationsLayer = new google.maps.KmlLayer( "http://" + window.location.host + "/~wuensch/T/data/Commuter_Rail_Stations.kml", 				{ clickable:true, preserveViewport:true, suppressInfoWindows:false } ) ;
+	var proposedStops 	= new google.maps.KmlLayer( "http://" + window.location.host + "/~wuensch/T/data/Proposed_Commuter_Rail_Stations_corrected.kml", 	{ clickable:true, preserveViewport:true, suppressInfoWindows:false } ) ;
+	if ( mainMapObject.getZoom() > 10 ) {
+		var timerTemp = setTimeout( function() {
+							trainsStationsLayer.setMap( mainMapObject ) ; 
+							proposedStops.setMap( mainMapObject ) ; 
+						}, 2000
+		)
+	}
+
+	google.maps.event.addListener( mainMapObject, 'zoom_changed', function() {
+			didUserChangeZoom = true ;
+			var zoomNow = mainMapObject.getZoom() ;
+			debug( "Zoom now " + zoomNow + " (zoom_changed listener)" ) ;
+			if ( zoomNow < 11 ) {
+				trainsStationsLayer.setMap( null ) ;
+				proposedStops.setMap( null ) ;
+			} else {
+				trainsStationsLayer.setMap( mainMapObject ) ;
+				proposedStops.setMap( mainMapObject ) ;
+			}
+		}
+	) ;
+
+	google.maps.event.addListener( mainMapObject, 'heading_changed', function() {
+			globalHeadingChangedState = true ;
+		}
+	) ;
+
+	google.maps.event.addListener( mainMapObject, 'idle', function() {
+			onIdle() ;
+		}
+	) ;
+
+	google.maps.event.addListener( mainMapObject, 'dragstart', function() {
+			markerWithInfoWindow = null ;	// Sneaky way of *preventing* the zoom-back-to-marker on a mobile device after the info window probably moved the map.
+			if ( userCoachToFollow != null || document.getElementById( "followLocation" ).checked == true ) {
+				document.getElementById( 'trainInfoDiv' ).innerHTML = "<font color=\"red\">" + document.getElementById( 'trainInfoDiv' ).innerHTML + "</font>" ;
+			}
+		}
+	) ;
+
+	google.maps.event.addListener( mainMapObject, 'dragend', function() {
+			markerWithInfoWindow = null ;	// Sneaky way of *preventing* the zoom-back-to-marker on a mobile device after the info window probably moved the map.
+		}
+	) ;
+
+	document.onkeydown = function( keyEvent ) {
+		keyEvent = keyEvent || window.keyEvent ;
+		if ( keyEvent.keyCode == 16 ) {
+			markerCluster.setMaxZoom( 1 ) ;
+			markerCluster.repaint() ;
+		}
+	} ;
+
+	document.onkeyup = function( keyEvent ) {
+		keyEvent = keyEvent || window.keyEvent ;
+		if ( keyEvent.keyCode == 16 && document.getElementById( "clustersOffButton" ).checked == false ) {
+			markerCluster.setMaxZoom( 15 ) ;
+			markerCluster.repaint() ;
+		}
+	} ;
+
+	var myClusterStyle = [ {
+		url: 'http://google-maps-utility-library-v3.googlecode.com/svn/trunk/markerclustererplus/images/m3.png',
+		height: 66,
+		width:  65,
+		textSize: 14
+	} ] ;
+
+	var myMarkerClusterOptions = {
+		maxZoom: 15,
+		gridSize: 30,
+		averageCenter: true,
+		ignoreHidden: true,
+		minimumClusterSize: 2,
+		title: 'Click to zoom in, or press \'Shift\' to show these markers',
+		styles: myClusterStyle
+	} ;
+
+	google.maps.event.addDomListener( document.getElementById( 'clustersOnButton' ), 'click', function() {
+		markerCluster.setMaxZoom( 15 ) ;
+		markerCluster.repaint() ;
+		}
+	) ;
+	google.maps.event.addDomListener( document.getElementById( 'clustersOffButton' ), 'click', function() {
+		markerCluster.setMaxZoom( 1 ) ;
+		markerCluster.repaint() ;
+		}
+	) ;
+
+	google.maps.event.addDomListener( document.getElementById( 'transitLayerOffButton' ), 'click', function() {
+		transitLayer.setMap( null ) ;
+		}
+	) ;
+	google.maps.event.addDomListener( document.getElementById( 'transitLayerOnButton' ), 'click', function() {
+		transitLayer.setMap( mainMapObject ) ;
+		}
+	) ;
+
+	markerCluster = new MarkerClusterer( mainMapObject, [], myMarkerClusterOptions ) ;
+
+	markerInfoWindow = new google.maps.InfoWindow( {
+		maxWidth: ( isMobilePlatform === true ? 0 : 400 )
+	} ) ;
+
+	google.maps.event.addListener( markerInfoWindow, 'closeclick', function() {
+					if ( isMobilePlatform == true && markerWithInfoWindow != null && ! userCoachToFollow && ! userTrainToFollow ) {
+						smartPanToMarker( markerWithInfoWindow ) ;	// Only "smart pan" if it's a small screen, and we know what marker had the window,
+					}							// and we are NOT following a coach / train.
+					markerWithInfoWindow = null ;
+		}
+	) ;
+
+	if ( isMobilePlatform === true ) {
+		var legendElement = document.getElementById( 'legend' ) ;
+		legendElement.style.maxWidth = '55px' ;
+		legendElement.style.fontSize = 'x-small' ;
+		legendElement.style.textAlign = 'center' ;
+		legendElement.style.padding = '1px' ;
+		legendElement.style.margin = '1px' ;
+	} else {
+		var controlsElement = document.getElementById( 'controls' ) ;
+		for ( var divs = [ 'doPanZoomToFitButtonDiv', 'markerOptionsDiv', 'markerLabelChoiceDiv' ], counter = 0, len = divs.length ; counter < len ; counter++ ) {
+			var newDiv = document.createElement( 'div' ) ;
+			newDiv.className = ( isMobilePlatform !== true ? 'legendBox' : 'legendBoxMobile' ) ;
+			newDiv.appendChild( document.getElementById( divs[ counter ] ) ) ;
+			controlsElement.appendChild( newDiv ) ;
+		}
+
+		document.getElementById( 'markerOptionsDiv2' ).style.display = "" ;
+		document.getElementById( 'markerLabelChoiceDiv2' ).style.display = "" ;
+		mainMapObject.controls[ google.maps.ControlPosition.LEFT_BOTTOM ].push( controls );
+		controlsElement.style.display = "" ;
+	}
+	mainMapObject.controls[ google.maps.ControlPosition.LEFT_TOP ].push( legend );
+}
+
+
+/******************************************************************************************************/
+function initLocationService() {
+
+	if ( navigator.geolocation ) {
+		usingLocationServices = true ;
+		document.getElementById( "locationTextDiv" ).style.display = "" ;
+		myGeoMarker = new GeolocationMarker( mainMapObject ) ;
+		myGeoMarker.setMarkerOptions( {
+						clickable: true,
+						title: "Your location. The surrounding circle shows the accuracy of the location data."
+					      } ) ;
+		myGeoMarker.setCircleOptions( { fillColor: '#C0C0C0' } ) ;
+
+		if ( watchLivePositionObject === undefined ) {
+			watchLivePositionObject = navigator.geolocation.watchPosition( watchLivePosition ) ;
+		}
+	} else {
+		usingLocationServices = false ;
+		log( "No location service enabled." ) ;
+	}
+
+}
+
+
+
+/******************************************************************************************************/
+function openLocationInfoWindow() {
+
+	if ( usingLocationServices === false ) {
+		initLocationService() ;			// If we haven't already initialized location, do it now!
+	}
+
+	if ( navigator.geolocation ) {
+		navigator.geolocation.getCurrentPosition(
+			function( position ) {
+				globalUserGeolocationPosition = position ;
+				html5Position = new google.maps.LatLng( position.coords.latitude, position.coords.longitude ) ;
+				if ( locationInfoWindow === undefined && didUserChangeLine !== true ) {
+					locationInfoWindow = new google.maps.InfoWindow( {
+						map: mainMapObject,
+						position: html5Position,
+						disableAutoPan: true,
+						maxWidth: ( isMobilePlatform === true ? 125 : 400 ),
+						content: 'Your location. <BUTTON TYPE="BUTTON" ID="zoomInPlease" onClick="stopFollowingTrains() ; zoomInOnThisLatLong( globalUserGeolocationPosition.coords.latitude, globalUserGeolocationPosition.coords.longitude ); ">Zoom in</BUTTON>'
+					} ) ;
+					google.maps.event.addListener( locationInfoWindow, 'closeclick', function() {
+							locationInfoWindow = undefined ;
+							document.getElementById( "findLocationButton" ).innerHTML = "Where am I?" ;
+						}
+					) ;
+					google.maps.event.addListenerOnce( locationInfoWindow, 'domready',
+						function() {
+							document.getElementById( "findLocationButton" ).innerHTML = "You're found!" ;
+						}
+					) ;
+				}
+
+				// Next four lines disabled because it automatically takes us to our location on page load. We don't want that - we want to see trains!
+				// We could have a global audience, so don't zoom in to California if they came here to see trains in Boston!!
+				//if ( mainMapObject.getBounds() !== undefined && mainMapObject.getBounds().contains( html5Position ) === false && didUserChangeLine !== true ) {
+				//	console.log( "1661: Pan to " + html5Position.toUrlValue() ) ;
+				//	mainMapObject.panTo( html5Position ) ;
+				//}
+
+			} , function() {
+				log( "Failed to get position." ) ;
+				document.getElementById( "findLocationButton" ).innerHTML = "Failed to get position." ;
+			}
+		) ;
+	} else {
+		usingLocationServices = false ;
+		log( "No location service enabled." ) ;
+		document.getElementById( "findLocationButton" ).innerHTML = "Where am I?" ;
+	}
+
+	if ( locationInfoWindow !== undefined ) {
+		document.getElementById( "findLocationButton" ).innerHTML = "You're found!" ;
+		if ( isMobilePlatform === false ) {
+			mainMapObject.panTo( locationInfoWindow.getPosition() ) ;
+		}
+	}
+	else {
+		document.getElementById( "findLocationButton" ).innerHTML = "Getting your location..." ;
+	}
+}
+
+
+/******************************************************************************************************/
+// This updates the location info window content & position, and optionally centers the map on the current location.
+function watchLivePosition( position ) {
+
+	globalUserGeolocationPosition = position ;
+	var newLatLong = new google.maps.LatLng( position.coords.latitude, position.coords.longitude ) ;
+
+	if ( followingLivePosition === true ) {
+		debug( "Pan to " + newLatLong.toUrlValue() ) ;
+		mainMapObject.panTo( newLatLong ) ;
+	}
+
+	if ( locationInfoWindow !== undefined ) {
+		var newWindowContent = 'Your location. <BUTTON TYPE="BUTTON" ID="zoomInPlease" onClick="stopFollowingTrains() ; zoomInOnThisLatLong( globalUserGeolocationPosition.coords.latitude, globalUserGeolocationPosition.coords.longitude ); ">Zoom in</BUTTON><BR>'
+				+ roundToDecimalPlaces( position.coords.latitude, 5 )
+				+ ", "
+				+ roundToDecimalPlaces( position.coords.longitude, 5 )
+				+ ", ±"
+				+ roundToDecimalPlaces( ( position.coords.accuracy * 3.28084 ), 0 )
+				+ "ft "
+				+ ( position.coords.altitude > 0 ? ( "<BR>altitude:&nbsp;"
+									+ roundToDecimalPlaces( ( position.coords.altitude * 3.28084 ), 0 )
+									+ "ft, ±"
+									+ roundToDecimalPlaces( ( position.coords.altitudeAccuracy * 3.28084 ), 0 )
+									+ "ft"
+					  			   ) : "" )
+				+ ( position.coords.speed   > 0 ?  ( "<BR>speed:&nbsp;"
+									+ roundToDecimalPlaces( ( position.coords.speed * 2.23694 ), 0 )
+									+ "MPH"
+					  			   ) : "" )
+				+ ( position.coords.heading > 0 ?  ( "<BR>heading:&nbsp;" 
+									+ roundToDecimalPlaces( position.coords.heading, 0 ) 
+									+ "° (" 
+									+ compass_from_azimuth( position.coords.heading ) 
+									+ ")" 
+								   ) : "" ) ;
+
+		locationInfoWindow.setOptions( { content: newWindowContent,
+						position: newLatLong
+						} ) ;
+	}
+}
+
+
+/******************************************************************************************************/
+function followLocationOrNot() {
+
+	if ( followingLivePosition === true ) { stopFollowingLocation() ; }
+	else { startFollowingLocation() ; }
+}
+
+
+/******************************************************************************************************/
+function startFollowingLocation() {
+
+	if ( usingLocationServices === false ) {
+		initLocationService() ;
+	}
+	document.getElementById( "followLocation" ).checked = true ;
+	followingLivePosition = true ;
+	stopFollowingTrains() ;
+	document.getElementById( 'trainInfoDiv' ).innerHTML = "<B>Now following your current, live position.</B> <BR>To stop, un-check \"Follow your location\" in <a href=\"#option10\">Option 10</a>." ;
+}
+
+
+/******************************************************************************************************/
+function stopFollowingLocation() {
+
+	document.getElementById( "followLocation" ).checked = false ;
+	followingLivePosition = false ;
+	document.getElementById( 'trainInfoDiv' ).innerHTML = "" ;
+}
+
+
+/******************************************************************************************************/
+function initOptionsAndActions() {
+
+//	$( "#thing" ).val( line  ) ;
+	$( '#userOptionRoutesList' ).change(
+		function () {
+			selectedLine = $( "#userOptionRoutesList option:selected" ).attr( "value" ) ;
+			didUserChangeLine = true ;
+			didUserChangeZoom = false ;
+			stopFollowingTrains() ;
+			mainLoop() ;
+		}
+	) ;
+}
+
+
+
+
+/******************************************************************************************************/
+function panZoomToFitCheck() {
+
+	if ( document.getElementById( "autoPanZoomCheckbox" ).checked == true ) {
+		doPanZoomToFit() ;
+	}
+}
+
+
+
+/******************************************************************************************************/
+function doPanZoomToFit() {
+
+	if ( alreadyMappedCoachesLength == 0 || totalTrainsVisible == 0 ) {	// If there's no trains visible, just head to the State House.
+		mainMapObject.panTo( new google.maps.LatLng( massStateHouseLat, massStateHouseLng ) ) ;
+		if ( mainMapObject.getZoom() > 10 ) { mainMapObject.setZoom( 10 ) ; }
+		debug( "State House!" ) ;
+		return
+	} ;
+
+	markerBounds = null ;
+	markerBounds = new google.maps.LatLngBounds() ;
+
+	for ( var myAlreadyMappedCoach in alreadyMappedCoaches ) {
+		if ( markers[ myAlreadyMappedCoach ].getVisible() == true ) {
+			markerBounds.extend( new google.maps.LatLng( alreadyMappedCoaches[ myAlreadyMappedCoach ].Latitude, alreadyMappedCoaches[ myAlreadyMappedCoach ].Longitude ) ) ;
+		}
+	}
+
+	var latDiff  = Math.abs( markerBounds.getNorthEast().lat() - markerBounds.getSouthWest().lat() ) ;
+	var longDiff = Math.abs( markerBounds.getNorthEast().lng() - markerBounds.getSouthWest().lng() ) ;
+	if ( latDiff < minBoundsSize || longDiff < minBoundsSize ) {
+		markerBounds.extend( new google.maps.LatLng( markerBounds.getNorthEast().lat() + minBoundsSize, markerBounds.getNorthEast().lng() + minBoundsSize ) ) ;
+		markerBounds.extend( new google.maps.LatLng( markerBounds.getSouthWest().lat() - minBoundsSize, markerBounds.getSouthWest().lng() - minBoundsSize ) ) ;
+	}
+
+	mainMapObject.panToBounds( markerBounds ) ;
+	mainMapObject.fitBounds( markerBounds ) ;
+	markerCluster.repaint() ;
+
+//	document.getElementById( "autoPanZoomCheckbox" ).checked = true ;
+}
+
+
+
+/******************************************************************************************************/
+function startFollowingCoach( thisCoachToFollow ) {
+
+	if ( thisCoachToFollow == null || thisCoachToFollow == "" ) {
+		stopFollowingTrains() ;
+		doPanZoomToFit() ;
+		processUserHidingChoice() ;
+		return ;
+	}
+
+	if ( queryStringCoachToFollow != thisCoachToFollow ) { queryStringCoachToFollow = null ; }
+	queryStringTrainToFollow = null ;
+	document.getElementById( "followLocation" ).checked = false ;
+	stopFollowingLocation() ;
+	document.getElementById( "autoPanZoomCheckbox" ).checked = false ;
+	updateTrainInfoDiv( thisCoachToFollow, "Coach" ) ;
+	markerCluster.setMaxZoom( 1 ) ;
+	markerCluster.repaint() ;
+	if ( mainMapObject.getZoom() < 12 ) {
+		zoomInOnThisCoach( thisCoachToFollow ) ;
+	} else {
+		smartPanToMarker( markers[ thisCoachToFollow ] ) ;
+	}
+	userCoachToFollow = thisCoachToFollow ;
+	adjustMarkerIndex( markers[ thisCoachToFollow ], 4 ) ;
+	$( "#coachesOptionList" ).val( thisCoachToFollow ) ;
+	$( "#trainsOptionList"  ).val( thisCoachToFollow ) ;
+
+}
+
+
+/******************************************************************************************************/
+function startFollowingTrain( prefixedThisTrainToFollow ) {
+
+console.log( "prefixedThisTrainToFollow: " + prefixedThisTrainToFollow ) ;
+
+window.alert( "Foo" ) ;
+return;
+
+	var thisTrainToFollow = prefixedThisTrainToFollow.split( "X" )[ 1 ] + "" ;	// Get rid of the prefix that protects leading zeros, and force to a string
+
+	console.log( "Train " + thisTrainToFollow ) ;
+	window.alert( "Train " + thisTrainToFollow ) ;
+
+	if ( trainsHashByTripJSON[ thisTrainToFollow ].Vehicles.length == 1 ) {
+		startFollowingCoach( trainsHashByTripJSON[ thisTrainToFollow ].Vehicles[ 0 ] ) ;
+	} else if ( trainsHashByTripJSON[ thisTrainToFollow ].Vehicles.length > 1 ) {
+		window.alert( "Duplicates!" ) ;
+	} else {
+		window.alert( "Foo" ) ;
+	}
+
+}
+
+/******************************************************************************************************/
+function stopFollowingTrains() {
+
+	var wasFollowingTrain = false ;		// Assume we weren't really following a train unless proven otherwise.
+
+	if ( userCoachToFollow || userTrainToFollow || queryStringCoachToFollow || queryStringTrainToFollow ) {		// Yes, then we were following a train.
+		document.getElementById( 'trainInfoDiv' ).innerHTML = "" ;
+		wasFollowingTrain = true ;
+	}
+
+	document.getElementById( 'userErrorDiv' ).innerHTML = "" ;
+	document.getElementById( 'coachesOptionList' ).selectedIndex = 0 ;
+	document.getElementById( 'trainsOptionList' ).selectedIndex = 0 ;
+	userCoachToFollow = null ;
+	userTrainToFollow = null ;
+	queryStringCoachToFollow = null ;
+	queryStringTrainToFollow = null ;
+
+	if ( document.getElementById( "clustersOnButton" ).checked == true ) {
+		markerCluster.setMaxZoom( 15 ) ;
+		markerCluster.repaint() ;
+	}
+
+	if ( mainMapObject.getZoom() > 12 && wasFollowingTrain ) {
+		mainMapObject.setZoom( mainMapObject.getZoom() - 2 ) ;	// This we don't want to do except in this specific case.
+	}
+
+}
+
+
+/******************************************************************************************************/
+function updateTrainInfoDiv( thisCoachNumber, typeBeingFollowed ) {
+
+	switch( typeBeingFollowed ) {
+
+	case "Train":
+		document.getElementById( 'trainInfoDiv' ).innerHTML = "<B>Now following Train " + alreadyMappedCoaches[ thisCoachNumber ].Trip + ".</B> " ;
+		break;
+
+	case "Coach":
+	default:
+		document.getElementById( 'trainInfoDiv' ).innerHTML = "<B>Now following Coach " + thisCoachNumber + ", Train " + alreadyMappedCoaches[ thisCoachNumber ].Trip + ".</B> " ;
+		break;
+
+	}
+
+	document.getElementById( 'trainInfoDiv' ).innerHTML += "<button type=\"button\" onClick=\"stopFollowingTrains();\">Click to stop following.</button>" ;
+	document.getElementById( 'trainInfoDiv' ).innerHTML += "<BR>" + alreadyMappedCoaches[ thisCoachNumber ].infoWindowContent ;
+
+	if ( markers[ thisCoachNumber ].lastMovementTime ) {
+		var tmp = new Date( 0 ) ;
+		tmp.setUTCSeconds( markers[ thisCoachNumber ].lastMovementTime ) ;
+		document.getElementById( 'trainInfoDiv' ).innerHTML += " Last position update and/or movement: " + tmp.toLocaleString() ;
+	}
+}
+
+
+/******************************************************************************************************/
+function zoomInOnThisCoach( coachNumber ) {
+
+//dev	zoomInOnThisLatLong( alreadyMappedCoaches[ coachNumber ].Latitude, alreadyMappedCoaches[ coachNumber ].Longitude ) ;
+	zoomInOnThisMarker( markers[ coachNumber ] ) ;
+
+}
+
+
+/******************************************************************************************************/
+function zoomInOnThisMarker( markerReference ) {
+
+	if ( markerReference.getVisible() != true ) {
+		markerReference.setVisible( true ) ;
+	}
+
+	mainMapObject.setZoom( 16 ) ;
+	smartPanToMarker( markerReference ) ;
+
+	// Raise the z-index so that the one we want to see is on top
+	adjustMarkerIndex( markerReference, 1 ) ;
+}
+
+
+/******************************************************************************************************/
+function smartPanToMarker( markerReference ) {
+
+	mainMapObject.panTo( markerReference.getPosition() ) ;
+
+	// If we're on a handheld (which has a narrow screen) and it's a big marker, scootch over a bit so the marker is (hopefully) all visible.
+	// Only the "Bubble" type is able to be huge. (At least right now... maybe there will be markers with big text later, but probably they will be centered on the lat/long.)
+	if ( isMobilePlatform == true ) {
+		if ( activeGoogleMarkerType == "StyledIconTypes.BUBBLE" && mainMapObject.getZoom() > 8 ) {
+			if ( markerReference.styleIcon.get( "text" ).length >= 14 ) {				// Marker text 14 chars or longer gets a bump of 75 points.
+				mainMapObject.panBy( 75, 0 ) ;
+			}
+			if ( markerReference.styleIcon.get( "text" ).length > 25 ) {				// Marker text longer than 25 gets a bump of AN ADDITIONAL 25 points, for a total of 100.
+				mainMapObject.panBy( 25, 0 ) ;
+			}
+		}
+	}
+}
+
+
+/******************************************************************************************************/
+function adjustMarkerIndex( markerToAdjust, adjustment ) {
+
+	var newIndex = markerToAdjust.getZIndex() + adjustment ;
+
+	if ( newIndex >= google.maps.Marker.MAX_ZINDEX ) {
+		newIndex = google.maps.Marker.MAX_ZINDEX - 1 ;
+	} else if ( newIndex <= 0 ) {
+		newIndex = 1 ;
+	}
+
+	markerToAdjust.setZIndex( newIndex ) ;
+
+//	markerToAdjust.setMap( null ) ;
+//	markerToAdjust.setMap( mainMapObject ) ;
+
+}
+
+
+/******************************************************************************************************/
+function zoomInOnThisLatLong( newCenterLat, newCenterLong ) {
+
+	var newCenterPosition = new google.maps.LatLng( newCenterLat, newCenterLong ) ;
+
+//	debug( "Pan to " + newCenterPosition.toUrlValue() ) ;
+	mainMapObject.panTo( newCenterPosition ) ;
+	mainMapObject.setZoom( mainMapObject.getZoom() + 2 ) ;
+
+//	debug( "Zoom is " + mainMapObject.getZoom() ) ;
+//	mainMapObject.setZoom( mainMapObject.getZoom() <= 14 ? mainMapObject.getZoom() + 2 : 14 ) ;
+//	mainMapObject.setZoom( mainMapObject.getZoom() > 15 ? mainMapObject.getZoom() - 5 : 16 ) ;
+//	debug( "Zoom now " + mainMapObject.getZoom() + " (function zoomInOnThisLatLong)" ) ;
+}
+
+/******************************************************************************************************/
+// for debugging
+function showArrayOutput( text, thing ) {
+	log( "--------------------------------------------------------------------" ) ;
+	for ( var i in thing ) {
+		log( text + "[ " + i + " ]: " + thing[ i ] ) ;
+	}
+}
+
+/******************************************************************************************************/
+// for debugging
+function log( h ) {
+	if ( userLogChoice ) {
+		document.getElementById( "log" ).innerHTML += shortTime( 'now' ) + " " + h + "<br />";
+	}
+}
+
+/******************************************************************************************************/
+// for debugging
+function debug( h ) {
+	if ( document.getElementById( "debug" ).innerHTML.length > 102400 ) {
+		document.getElementById( "debug" ).innerHTML = "" ;
+		debug( "Cleared debug at 100KB, " + shortTime( 'now' ) ) ;
+	}
+	if ( userDebugChoice ) {
+		document.getElementById( "debug" ).innerHTML += shortTime( 'now' ) + " " + h + "<br />";
+	}
+}
+
+/******************************************************************************************************/
+function mappedTrainsListOnOffFlip() {
+	document.getElementById( 'mappedTrainsListDiv' ).style.display = 	( document.getElementById( 'mappedTrainsListDiv' ).style.display == "none" ) ? "" : "none" ;
+	document.getElementById( 'mappedTrainsTableDiv' ).style.display = 	( document.getElementById( 'mappedTrainsTableDiv' ).style.display == "none" ) ? "" : "none" ;
+	document.getElementById( 'mappedTrainsListChoiceButton' ).innerHTML =	( document.getElementById( 'mappedTrainsListDiv' ).style.display == "none" ) ? "Show a detailed table" : "Hide the detailed table" ;
+
+//dev	$( "#mappedTrainsTableDivTable" ).trigger( "update" ) ;
+//dev	console.log( "trigger update just now" ) ;
+}
+
+/******************************************************************************************************/
+function unmappedTrainsListOnOffFlip() {
+	document.getElementById( 'unmappedTrainsListDiv' ).style.display = 	( document.getElementById( 'unmappedTrainsListDiv' ).style.display == "none" ) ? "" : "none" ;
+	document.getElementById( 'unmappedTrainsTableDiv' ).style.display = 	( document.getElementById( 'unmappedTrainsTableDiv' ).style.display == "none" ) ? "" : "none" ;
+	document.getElementById( 'unmappedTrainsListChoiceButton' ).innerHTML =	( document.getElementById( 'unmappedTrainsListDiv' ).style.display == "none" ) ? "Show unmapped trains table" : "Hide unmapped trains table" ;
+}
+
+/******************************************************************************************************/
+function logOnOffFlip() {
+	userLogChoice = ( userLogChoice == true ) ? false : true ; 	// Invert the value - toggle back & forth.
+	document.getElementById( "userLogChoiceButton" ).innerHTML = ( userLogChoice == true ) ? "Is On" : "Is Off" ;
+	debug( ( userLogChoice == true ) ? "Log is now On" : "Log is now Off" ) ;
+}
+
+/******************************************************************************************************/
+function debugOnOffFlip() {
+	debug( ( userDebugChoice == false ) ? "Debug is now On" : "Debug is now Off" ) ;
+	userDebugChoice = ( userDebugChoice == true ) ? false : true ; 	// Invert the value - toggle back & forth.
+	document.getElementById( "userDebugChoiceButton" ).innerHTML = ( userDebugChoice == true ) ? "Is On" : "Is Off" ;
+	debug( ( userDebugChoice == true ) ? "Debug is now On" : "Debug is now Off" ) ;
+}
+
+/******************************************************************************************************/
+// Round to a certain number of decimal places.
+function roundToDecimalPlaces( value, places ) {
+	return Math.round( value * Math.pow( 10, places ) ) / Math.pow( 10, places ) ;
+}
+
+
+
+
+/******************************************************************************************************/
+function shortTime( inputTime ) {
+	var someDate = ( inputTime == 'now' ) ? new Date() : new Date( inputTime ) ;
+	return someDate.getHours() + ':' + ( someDate.getMinutes() < 10 ? '0' : '' ) + someDate.getMinutes() + ':' + ( someDate.getSeconds() < 10 ? '0' : '' ) + someDate.getSeconds() ;
+}
+
+
+
+/******************************************************************************************************/
+// Grab the query string and return as associative array
+function getUrlVars() {
+	var urlVars = [] ;
+	if ( window.location.search.length > 1 ) {
+		var pairs = window.location.search.substr( 1 ).split( "&" ) ;
+		for ( var counter = 0 ; counter < pairs.length ; counter++ ) {
+			var keyVal = pairs[ counter ].split( '=' ) ;
+			urlVars[ unescape( keyVal[ 0 ] ) ] = keyVal.length > 1 ? unescape( keyVal[ 1 ] ) : "" ;
+		}
+	}
+	return urlVars ;
+}
+
+
+/******************************************************************************************************/
+
+// Based on compass_from_azimuth
+// by K. Lindquist
+// Geophysical Institute
+// University of Alaska, Fairbanks
+// 1998
+//
+// Converted from Perl to JavaScript by Stefan, 2013
+
+function compass_from_azimuth( azimuth ) {
+
+	while( azimuth < 0. )   { azimuth += 360. ; } ;
+	while( azimuth > 360. ) { azimuth -= 360. ; } ;
+
+	if ( azimuth >= 348.75 || azimuth < 11.25 ) {
+		return "N";		// 0.00
+	} else if ( azimuth >= 11.25 && azimuth < 33.75 ) {
+		return "NNE";		// 22.50
+	} else if ( azimuth >= 33.75 && azimuth < 56.25 ) {
+		return "NE";		// 45.00	
+	} else if ( azimuth >= 56.25 && azimuth < 78.75 ) {
+		return "ENE";		// 67.50	
+	} else if ( azimuth >= 78.75 && azimuth < 101.25 ) {
+		return "E";		// 90.00	
+	} else if ( azimuth >= 101.25 && azimuth < 123.75 ) {
+		return "ESE";		// 112.50	
+	} else if ( azimuth >= 123.75 && azimuth < 146.25 ) {
+		return "SE";		// 135.00	
+	} else if ( azimuth >= 146.25 && azimuth < 168.75 ) {
+		return "SSE";		// 157.50	
+	} else if ( azimuth >= 168.75 && azimuth < 191.25 ) {
+		return "S";		// 180.00	
+	} else if ( azimuth >= 191.25 && azimuth < 213.75 ) {
+		return "SSW";		// 202.50	
+	} else if ( azimuth >= 213.75 && azimuth < 236.25 ) {
+		return "SW";		// 225.00 	
+	} else if ( azimuth >= 236.25 && azimuth < 258.75 ) {
+		return "WSW";		// 247.50	
+	} else if ( azimuth >= 258.75 && azimuth < 281.25 ) {
+		return "W";		// 270.00	
+	} else if ( azimuth >= 281.25 && azimuth < 303.75 ) {
+		return "WNW";		// 292.50	
+	} else if ( azimuth >= 303.75 && azimuth < 326.25 ) {
+		return "NW";		// 315.00	
+	} else if ( azimuth >= 326.25 && azimuth < 348.75 ) {
+		return "NNW";		// 337.50	
+	} else {
+		return "X"; // Faulty logic if we hit this
+	}
+}
+
+
+/******************************************************************************************************/
+
+
+
+
+
+(function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+(i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+})(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+ga('create', 'UA-52699621-1', 'auto');
+ga('send', 'pageview');
+
+</script>
+</head>
+<body onresize="onResize();">
+
+<NOSCRIPT>
+<H1>You appear to have Javascript disabled in your browser. <BR>This application requires Javascript to work. Sorry!</H1>
+</NOSCRIPT>
+
+<div id="topText">
+<B>Welcome to Live MBTA (<a TARGET="_new" href="http://www.keoliscs.com/">Keolis</a>) Commuter Rail Train Mapping by Stefan!</B> <BR>
+<font size="-1">
+See the <a href="#instructions">instructions</a> and <a href="#options">options</a> at the bottom of the page for how this works, and what you can do here. 
+There are many ways to customize how the trains are shown!
+</font>
+<font size="-2">
+<BR>Last app revision: 2014-08-15 9:46 PM
+</font>
+</div>
+
+<div id="dataErrorDiv"></div>
+<div id="duplicatesDiv"></div>
+<A NAME="map">
+<div id="map_canvas" style="width: 90%; height: 50%;"><B>The Google Map is loading... If it doesn't appear after a while, try reloading the page.</B></div>
+</A>
+<div id="trainInfoDiv"></div>
+<div id="userErrorDiv"></div>
+<P>
+<div id="numberOfHiddenTrainsDiv"><B>The train data are loading... If they don't finish after a while, try reloading the page.</B></div>
+
+<A NAME="trains">
+<div id="mappedTrainsDiv" style="display:none;">
+	<button type="button" onClick="mappedTrainsListOnOffFlip();" id="mappedTrainsListChoiceButton">Show a detailed table</button> 
+	of all the trains on the map. <br>
+	<div id="mappedTrainsTableDiv" style="display:none;"></div>
+	<div id="mappedDeparturesDiv"></div><P>
+	<div id="mappedTrainsListDiv"  style="display:none;"></div>
+</div>
+</A>
+
+<P>
+<div id="unmappedTrainsDiv" style="display:none;">
+	<HR WIDTH="100%">
+	There are trains for which the MBTA is not getting or sending position data: <br>
+	<div id="unmappedTrainsSummaryDiv"></div>
+	<button type="button" onClick="unmappedTrainsListOnOffFlip();" id="unmappedTrainsListChoiceButton">Show unmapped trains table...</button>
+	<div id="unmappedTrainsTableDiv" style="display:none;"></div>
+	<div id="unmappedTrainsListDiv"  style="display:none;"></div>
+</div>
+
+<div id="optionsDiv">
+<A NAME="options">
+<HR WIDTH="100%">
+<H3>Options:</H3>
+</A>
+<a href="#">(Jump back up to top)</a>
+
+<OL>
+<LI>
+<A NAME="option1">
+Choose a route:
+</A>
+<select id="userOptionRoutesList">
+	<OPTION VALUE="all" SELECTED>All MBTA / Keolis Train Lines</OPTION>
+	<OPTION VALUE="north">All North Side Lines</OPTION>
+	<OPTION VALUE="south">All South Side Lines</OPTION>
+	<OPTION VALUE="fairmount">Fairmount Line</OPTION>
+	<OPTION VALUE="fitchburg">Fitchburg Line</OPTION>
+	<OPTION VALUE="framinghamworcester">Framingham / Worcester Line</OPTION>
+	<OPTION VALUE="franklin">Franklin Line</OPTION>
+	<OPTION VALUE="greenbush">Greenbush Line</OPTION>
+	<OPTION VALUE="haverhill">Haverhill Line</OPTION>
+	<OPTION VALUE="kingstonplymouth">Kingston / Plymouth Line</OPTION>
+	<OPTION VALUE="lowell">Lowell Line</OPTION>
+	<OPTION VALUE="middleboroughlakeville">Middleborough / Lakeville Line</OPTION>
+	<OPTION VALUE="needham">Needham Line</OPTION>
+	<OPTION VALUE="newburyportrockport">Newburyport / Rockport Line</OPTION>
+	<OPTION VALUE="providencestoughton">Providence / Stoughton Line</OPTION>
+</select>
+</LI>
+
+<P><LI>
+<A NAME="option2">
+Follow one of these trips:
+</A>
+<select id="trainsOptionList" onChange="startFollowingCoach( this.value ) ;">
+	<option value="">(Please wait while the train data are loading.)</option>
+</select>
+<BR>or follow a coach:
+<select id="coachesOptionList" onChange="startFollowingCoach( this.value ) ;">
+	<option value="">(Please wait while the train data are loading.)</option>
+</select>
+<BR><B>or you can just Right-Click on a marker on the map to follow it!</B>
+</LI>
+<div id="duplicateTrainInfoDiv"></div>
+
+<P><LI>
+<A NAME="option3">
+Marker display options:
+</A>
+<div id="markerOptionsDiv">
+<div id="headingArrowCheckboxDiv">
+Show train heading arrow:
+<input type="checkbox" ID="headingArrowCheckbox" onClick="processUserMarkerChoice();" CHECKED>
+</div>
+<div id="markerLabelCheckboxDiv">
+Show train info on marker:
+<input type="checkbox" ID="markerLabelCheckbox" onClick="processUserMarkerChoice();" CHECKED>
+</div>
+<div id="verbosityCheckboxDiv">
+Show verbose marker labels:
+<input type="checkbox" ID="verbosityCheckbox" onClick="setMarkerTextVerbosity();" CHECKED>
+</div>
+<div id="verbosityCheckboxBlankDiv" style="display:none;">
+&nbsp;
+</div>
+</div>
+<div id="markerOptionsDiv2" style="display:none;">
+(See controls within <a href="#map">the map</a>, bottom left corner.)
+</div>
+</LI>
+
+<P><LI>
+<A NAME="option4">
+Marker label options:
+</A>
+<div id="markerLabelChoiceDiv">
+Choose a label:<BR>
+<SELECT id="markerLabelChoice" onChange="processUserLabelChoice();">
+	<OPTION VALUE="cycle"	SELECTED>Automatically cycle labels</OPTION>
+	<OPTION VALUE=""		>-----------------------</OPTION>
+	<OPTION VALUE="nextStopName"	>Next Stop or Nearest Station</OPTION>
+	<OPTION VALUE="trip"		>Train Trip Number</OPTION>
+	<OPTION VALUE="coach"		>Control Coach Number</OPTION>
+	<OPTION VALUE="tripandcoach"	>Train *and* Coach Numbers</OPTION>
+	<OPTION VALUE="destination"	>Train Trip Destination</OPTION>
+	<OPTION VALUE="lateness"	>Minutes late or early</OPTION>
+	<OPTION VALUE="speed"		>Reported speed in MPH</OPTION>
+</SELECT>
+</div>
+<div id="markerLabelChoiceDiv2" style="display:none;">
+(See controls within <a href="#map">the map</a>, bottom left corner.)
+</div>
+</LI>
+
+<P><LI>
+<A NAME="option5">
+Map movement options:
+</A>
+<div id="doPanZoomToFitButtonDiv">
+Pan & zoom to fit:
+<button type="button" ID="doPanZoomToFitButton" onClick="doPanZoomToFit();">All these trains</button>
+</div>
+Each time show/hide options are changed, automatically move & zoom the map to fit only the visible markers:
+<input type="checkbox" ID="autoPanZoomCheckbox" CHECKED>
+</LI>
+
+<P><LI>
+<A NAME="option6">
+Show only trains which have had their location changed or updated in the last:
+</A><BR>
+<select id="showMovingOptionList" onChange="processUserHidingChoice() ; panZoomToFitCheck() ;">
+	<option value="0">Any time (Show all trains)</option>
+	<option value="5">5 sec. (debugging)</option>
+	<option value="45">45 sec. (debugging)</option>
+	<option value="60">1 min. (only very recent changes)</option>
+	<option value="120">2 minutes</option>
+	<option value="300">5 minutes</option>
+	<option value="600">10 minutes</option>
+	<option value="900">15 minutes</option>
+	<option value="1800">30 minutes</option>
+</select><BR>
+<font size="-1">
+(Note: The last position change / update could be from train movement <BR>or just from the marker loading on this map.)
+</font>
+</LI>
+
+<P><LI>
+<A NAME="option7">
+Show on the map only the trains which have their next arrival or departure within:
+</A><BR>
+<select id="showUpcomingOptionList" onChange="processUserHidingChoice() ; panZoomToFitCheck() ;">
+	<OPTION VALUE="0"     >Any time (Show all trains)</OPTION>
+	<OPTION VALUE="300"   >5 minutes</OPTION>>
+	<OPTION VALUE="600"   >10 minutes</OPTION>>
+	<OPTION VALUE="900"   >15 minutes</OPTION>>
+	<OPTION VALUE="1800"  >30 minutes</OPTION>
+	<OPTION VALUE="3600"  >1 hour</OPTION>
+	<OPTION VALUE="7200"  >2 hours</OPTION>
+	<OPTION VALUE="14400" >4 hours</OPTION>
+	<OPTION VALUE="21600" >6 hours</OPTION>
+	<OPTION VALUE="43200">12 hours</OPTION>
+	<OPTION VALUE="86400">24 hours</OPTION>
+</select>
+</LI>
+
+<P><LI>
+<A NAME="option8">
+Marker Clusters:
+</A><BR>
+<div id="clustersOnButtonDiv" ><INPUT TYPE="radio" NAME="clusters" VALUE="on"  id="clustersOnButton" CHECKED>On&nbsp;(default)</div>
+<div id="clustersOffButtonDiv"><INPUT TYPE="radio" NAME="clusters" VALUE="off" id="clustersOffButton">Off</div>
+Note: Marker Clusters can be momentarily disabled by pressing "Shift" at any time.
+</LI>
+
+<P><LI>
+<A NAME="option9">
+Turn the Google transit map layer:
+</A>
+<div id="transitLayerOnButton" ><INPUT TYPE="radio" NAME="transit" VALUE="on" CHECKED>On&nbsp;(default)</div>
+<div id="transitLayerOffButton"><INPUT TYPE="radio" NAME="transit" VALUE="off">Off</div>
+</LI>
+
+<P><LI>
+<form>
+	<div id="locationTextDiv">
+		<A NAME="option10">Find your location:</A>&nbsp;<button type="button" ID="findLocationButton" onClick="openLocationInfoWindow();">Where am I?</button> <BR>
+		Follow your location:&nbsp;<input type="checkbox" ID="followLocation" onClick="followLocationOrNot();">
+	</div>
+</form>
+</LI>
+
+</OL>
+</div>
+
+<div id="instructionsDiv">
+<a name="instructions">
+<HR WIDTH="100%">
+<H3>Instructions & Information:</H3>
+</a>
+<a href="#">(Jump back up to top)</a>
+<UL>
+	<LI>
+	This application displays <a href="http://www.mbta.com/" TARGET="_new">MBTA</a> (<a TARGET="_new" href="http://www.keoliscs.com/">Keolis</a>) 
+	<a TARGET="_new" href="http://www.mbta.com/schedules_and_maps/rail/">Commuter Rail</a> trains on a Google Map in real time. 
+	The trains transmit their GPS position and trip information, and the MBTA aggregates the data into a publicly available feed. The data are dependent upon the 
+	onboard <a TARGET="_new" href="http://www.mbta.com/about_the_mbta/news_events/?id=21418">PTIS</a> equipment; glitches can occur if the PTIS on a train is set incorrectly.
+	</LI><BR><LI>
+	This page will automatically load new train data from the MBTA as they are available. Train position data are typically updated every one to two minutes.
+	</LI><BR><LI>
+	You can move your cursor over a train marker on the map to have an information balloon pop up with detail about that train. (Mobile device users tap on a marker.)
+	A link in the info balloon lets you view the official MBTA schedule for that line and direction on 
+	<A HREF="http://www.mbta.com/schedules_and_maps/rail/" TARGET="_new">mbta.com</A>.
+	</LI><BR><LI>
+	A double-click on a marker will zoom in on that train. (Mobile device users double-tap.) When zoomed in, a double-click or double-tap on the marker will instead zoom back out to the region overview.
+	</LI><BR><LI>
+	You can "follow" a train to its destination by any one of four methods: 
+	<OL><BR>
+		<LI>Choose a trip or a coach from <a href="#option2">the lists (Option 2)</a>
+		</LI><BR>
+		<LI>Right-click on a marker on the map
+		</LI><BR>
+		<LI>Click or tap on the coach number in the <a href="#trains">table of mapped trains</a>
+		</LI><BR>
+		<LI>Click / tap the coach number link in the pop-up info window of a train marker
+		</LI><BR>
+	</OL>
+	While following a train, the map will move so that the train you've selected will remain in the center of the map until you stop following it, or until it no longer appears in the data feed. 
+	</LI><BR><LI>
+	If red clusters of markers are being displayed, click / tap on the cluster icon to zoom in and see more or all of the trains in that cluster. 
+	(Clusters appear when there are too many trains in one area to reasonably show individual markers.) Marker clusters can be turned off in the <a href="#option8">options section, number 8</a>. 
+	Also, marker clusters will come and go as you zoom in and out using the standard Google Map navigation methods. 
+	</LI><BR><LI>
+	Marker clusters can be quickly toggled on/off by pressing the "Shift" key.
+	</LI><BR><LI>
+	Train position markers can be set to indicate many different things. In the options section (<a href="#option4">number 4</a>) you can choose to show the 
+	station / stop name, the train speed, early / late, and more.
+	</LI><BR><LI>
+	This web application is able to detect popular mobile devices (for example iPhone and Android) and should display a mobile version of the map when viewed on a handheld device.
+	</LI><BR><LI>
+	It takes about 1 to 2 minutes (from what I have observed) for a train's data update to show up in the public data feed. This means that (for example) a train travelling at 60 MPH could 
+	actually be 2 miles farther down the line than it appears on the map.
+	</LI><BR><LI>
+	Some options can be specified in the page URL, so you can bookmark the choice for returning again later. For example, 
+	<a href="http://www.people.fas.harvard.edu/~wuensch/T/live-train-map-beta.html?coach=1800">this link</a> will show you 
+	the newest train coach #1800 which was just put into service in April 2013. Another example is 
+	<a href="http://www.people.fas.harvard.edu/~wuensch/T/live-train-map-beta.html?train=162">this link</a> which is 
+	train 162, an inbound weekday AM trip from Newburyport.
+	</LI><BR><LI>
+	Page scrolling note: In most web browsers, the normal page scrolling movements up or down using a mouse wheel or trackpad (or page up / page down keys) are interpreted by Google Maps to be 
+	a Zoom In / Zoom Out or map movement action. If you want to scroll this entire web page up or down you need to first position the cursor on the white space outside the Google Map pane. Also 
+	a spacebar press should scroll the entire page down in most browsers. iPhone users can scroll this page up &amp; down by dragging the white borders on the left and right of the map.
+	</LI><BR><LI>
+	This application is designed to be a mapping and visualization tool for those interested in railroad operations. Although I didn't design this to be an application for daily commuters, 
+	it can be used for trip prediction with great success. I do in fact use this for my own commute, to and from Boston, five days a week! 
+	As an option for commuters who want to know about just a few specific daily trains <B>I highly recommend <a TARGET="_new" href="http://www.t-on-time.com/">t-on-time.com</a>!</B>
+	</LI><BR><LI>
+	This is an update to <a href="http://www.people.fas.harvard.edu/~wuensch/T/live-train-map.cgi">my original MBTA train mapping app</a>. 
+	This new version animates the train markers on the map, instead of reloading the entire page as my older version does. 
+	Although I consider <a href="http://www.people.fas.harvard.edu/~wuensch/T/live-train-map.cgi">that old version</a> to be obsolete, it still 
+	does a few things that this new one can do... like allowing you to bookmark a link not only to follow a train or coach, but also a set of view options.
+	</LI>
+</UL>
+</div>
+
+<HR WIDTH="100%">
+<font size ="-1">
+<P>
+<U>This application &copy; 2014 by Stefan Wuensch</U>. <BR>
+Note: Train information is from the MBTA / Keolis and is not guaranteed to be accurate. 
+<br>Unusual data have been seen once a train consist is out of service or on an alternate route. 
+<br>Sometimes the <a TARGET="_new" href="http://www.mbta.com/uploadedfiles/devguide.pdf">PTIS</a> unit in the control coach may indicate 
+the wrong trip, which can show (for example) a train with location near Waltham indicating "now arriving at Swampscott".
+<BR>
+Questions? Comments? Contact Stefan via 
+<a href="http://www.railroad.net/">Railroad.net</a>! 
+<a href="http://www.railroad.net/forums/ucp.php?mode=register">Register for free</a> and then you can contact 
+<a href="http://www.railroad.net/forums/memberlist.php?mode=viewprofile&amp;u=2547" target="_new">Stefan</a> via 
+<a href="http://www.railroad.net/forums/ucp.php?i=pm&amp;mode=compose&amp;u=2547" target="_new">personal message</a>.
+<BR><B><FONT COLOR="ff0000">The <a TARGET="_new" href="http://www.mbta.com/rider_tools/developers/default.asp?id=21899">data behind this app</a> is provided by the MBTA.</FONT>
+Contact <a href="mailto:developer@mbta.com">developer@mbta.com</a></B><BR>
+<B>The MBTA is not responsible for this application - only the data that feeds it. <BR>
+Stefan is not responsible for inaccurate data from the MBTA - only the visualization of that data.
+</B>
+</P>
+</font>
+
+<HR WIDTH="100%">
+<h3>Log:
+<button type="button" onClick="logOnOffFlip();" id="userLogChoiceButton">Is Off</button></h3>
+<div id="log"></div>
+<script type="text/javascript">
+	document.getElementById( "userLogChoiceButton" ).innerHTML = ( userLogChoice ? "Is On" : "Is Off" ) ;
+</script>
+
+<HR WIDTH="100%">
+<h3>Debug: 
+<button type="button" onClick="debugOnOffFlip();" id="userDebugChoiceButton">Is Off</button>
+<button type="button" onClick="document.getElementById( 'debug' ).innerHTML = '' ;">Clear</button></h3>
+<div id="debug"></div>
+<script type="text/javascript">
+	document.getElementById( "userDebugChoiceButton" ).innerHTML = ( userDebugChoice ? "Is On" : "Is Off" ) ;
+</script>
+
+<A NAME="bugs">
+<HR WIDTH="100%">
+<H5>Bugs &amp; To-Do list</H5>
+</A>
+
+<OL>
+
+<LI>
+To do: Get the station labels KML layer updated with useful links to station info, instead of the links to massgis.state.ma.us
+</LI>
+
+<LI>
+Bug: Have to account for the "Terrain" map which doesn't allow such close-in zooming as the other map types. 
+It makes the marker clicking not work properly because the zooming can't happen as expected right now!
+</LI>
+
+<LI>
+Bug: My links to the schedule pages from the train info don't take into account when a train is listed on (for example) 
+<a href="http://www.mbta.com/schedules_and_maps/rail/lines/?route=FITCHBRG&amp;direction=O&amp;timing=U">the Saturday schedule but has stops after midnight which is Sunday</a>... 
+so I have to show the appropriate day when the schedule wraps around midnight.
+</LI>
+</OL>
+<HR WIDTH="100%">
+
+<div id="legend" style="display:none;"></div>
+<div id="controls" style="display:none;"></div>
+<div id="stillLoadingDiv" style="display:none;"><P><B>Please wait while the map and train data are loaded.</B></P></div>
+
+</body>
+</html>
